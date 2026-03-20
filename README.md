@@ -22,7 +22,7 @@ This was written a mix between myself and claude, sure, some of it's big slop bu
 
 ### Acknowledgements
 
-- Thanks to [dusthillguy](https://www.youtube.com/watch?v=IK1ydvw3xkU) for letting me use the song *"Joona Kouvolalainen buttermilk"* as hold music and distribute it.
+- Thanks to [dusthillguy](https://dusthillguy-music-blog1.tumblr.com/) for letting me use the song [*"Joona Kouvolalainen buttermilk"*](https://www.youtube.com/watch?v=IK1ydvw3xkU) as hold music.
 - Thanks to [wberg](https://wberg.com/) for hosting `bridge-eu1`
 - Thanks to [chrischrome](https://litenet.tel/) for hosting `bridge-use1`
 
