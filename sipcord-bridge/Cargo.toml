@@ -2,10 +2,10 @@
 name = "sipcord-bridge"
 version = "1.5.5"
 edition = "2024"
-authors.workspace = true
+authors = ["coral <jonas@jonasbengtson.se>"]
 license = "AGPL-3.0-only"
-repository.workspace = true
-homepage.workspace = true
+repository = "https://github.com/coral/sipcord-bridge"
+homepage = "https://sipcord.net/"
 publish = false
 
 [[bin]]
