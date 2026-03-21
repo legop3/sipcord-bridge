@@ -52,7 +52,20 @@ fn main() {
             println!("cargo:rustc-link-lib=static={}", lib);
         }
 
-        vec![prefix.join("include")]
+        // cmake --install may place headers in a multiarch subdirectory
+        // (e.g. include/aarch64-linux-gnu/) instead of include/ directly.
+        // Scan for the actual pjsua-lib directory.
+        let base_include = prefix.join("include");
+        let mut include_dirs = vec![base_include.clone()];
+        if let Ok(entries) = std::fs::read_dir(&base_include) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && path.join("pjsua-lib/pjsua.h").exists() {
+                    include_dirs.insert(0, path);
+                }
+            }
+        }
+        include_dirs
     } else {
         build_from_source(&out_dir)
     };
