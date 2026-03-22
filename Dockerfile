@@ -55,6 +55,17 @@ RUN mkdir -p /build/pjproject-install/lib && \
     find /build/pjproject-build /build/pjproject-install -name '*.a' -exec cp -n {} /build/pjproject-install/lib/ \; && \
     echo "Libraries collected:" && ls /build/pjproject-install/lib/
 
+# Collect headers from source tree (cmake --install often fails to install them).
+# Also grab generated config_site.h from the build directory.
+RUN mkdir -p /build/pjproject-install/include && \
+    for dir in pjlib/include pjlib-util/include pjmedia/include pjnath/include pjsip/include; do \
+        if [ -d "/build/pjproject-src/$dir" ]; then \
+            cp -r /build/pjproject-src/$dir/* /build/pjproject-install/include/; \
+        fi; \
+    done && \
+    find /build/pjproject-build -name 'config_site.h' -exec cp {} /build/pjproject-install/include/pj/ \; 2>/dev/null; \
+    echo "Headers collected:" && ls /build/pjproject-install/include/
+
 # Stage 2: Build Rust dependencies (cached unless Cargo.toml/lock changes)
 FROM build-base AS deps-builder
 
