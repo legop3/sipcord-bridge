@@ -585,6 +585,13 @@ pub fn init_pjsua(config: &SipConfig, tls_config: Option<&TlsConfig>) -> Result<
         // unreachable, causing retransmit storms and eventual 408 disconnect).
         acc_cfg_ptr.use_timer = pjsua_sip_timer_use_PJSUA_SIP_TIMER_INACTIVE;
 
+        // Disable codec locking. When enabled (the default), pjsua sends an
+        // UPDATE or re-INVITE after call establishment to narrow the codec list
+        // to the single negotiated codec. Many phones (e.g. Snom 300) respond
+        // 481 to in-dialog UPDATE, killing the call immediately after answer.
+        // The initial INVITE/200 OK codec negotiation is sufficient.
+        acc_cfg_ptr.lock_codec = 0;
+
         // Configure RTP port range for media
         // port is the starting port, port_range is how many consecutive ports to try
         acc_cfg_ptr.rtp_cfg.port = config.rtp_port_start as u32;
