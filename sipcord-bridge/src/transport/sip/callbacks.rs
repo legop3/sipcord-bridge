@@ -471,50 +471,29 @@ pub unsafe extern "C" fn on_incoming_call_cb(
         }
 
         // Extension-length ban checks use config values
+        // Both long and suspicious extensions use progressive timeouts (no permabans)
         if let Some(ban_mgr) = crate::services::ban::global() {
             let ext_len = extension.len();
             let is_numeric = extension.chars().all(|c: char| c.is_ascii_digit());
 
-            // Check for very long extension (permaban, likely fraud)
-            if ext_len >= ban_mgr.permaban_extension_min_length() && is_numeric {
+            // Check for invalid extension length (outside valid 1-5 digit range, all numeric)
+            // Uses progressive timeouts - legitimate users recover, scanners escalate
+            if is_numeric && ext_len >= ban_mgr.suspicious_extension_min_length() {
                 if let Some(ip) = source_ip {
                     if ban_mgr.is_enabled() && !ban_mgr.is_whitelisted(&ip) {
-                        let result = ban_mgr.record_permanent_ban(ip, "very_long_extension");
+                        let reason = if ext_len >= ban_mgr.permaban_extension_min_length() {
+                            "very_long_extension"
+                        } else {
+                            "suspicious_extension"
+                        };
+                        let result = ban_mgr.record_offense(ip, reason);
                         if result.should_log {
                             tracing::warn!(
-                                "PERMABAN IP {} for very long extension: {} ({} digits, call {})",
+                                "Timed out IP {} for {} extension: {} ({} digits, call {}, offense_level={}, timeout={}s)",
                                 ip,
+                                reason,
                                 extension,
                                 ext_len,
-                                call_id
-                            );
-                        }
-                    }
-                } else {
-                    tracing::warn!(
-                        "Rejecting very long extension: {} ({} digits, call {})",
-                        extension,
-                        ext_len,
-                        call_id
-                    );
-                }
-                pjsua_call_hangup(*call_id, 404, ptr::null(), ptr::null());
-                return;
-            }
-
-            // Check for mid-length suspicious extension (progressive timeout)
-            if ext_len >= ban_mgr.suspicious_extension_min_length()
-                && ext_len <= ban_mgr.suspicious_extension_max_length()
-                && is_numeric
-            {
-                if let Some(ip) = source_ip {
-                    if ban_mgr.is_enabled() && !ban_mgr.is_whitelisted(&ip) {
-                        let result = ban_mgr.record_offense(ip, "suspicious_extension");
-                        if result.should_log {
-                            tracing::warn!(
-                                "Timed out IP {} for suspicious extension: {} (call {}, offense_level={}, timeout={}s)",
-                                ip,
-                                extension,
                                 call_id,
                                 result.offense_level,
                                 result.timeout_secs
@@ -523,7 +502,7 @@ pub unsafe extern "C" fn on_incoming_call_cb(
                     }
                 } else {
                     tracing::warn!(
-                        "Rejecting suspicious extension: {} ({} digits, call {})",
+                        "Rejecting invalid extension: {} ({} digits, call {})",
                         extension,
                         ext_len,
                         call_id
