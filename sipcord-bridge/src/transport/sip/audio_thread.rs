@@ -316,6 +316,36 @@ fn is_call_valid(call_id: CallId) -> bool {
     }
 }
 
+/// Short, log-friendly description of a pending op — avoids dumping sample buffers.
+fn describe_op(op: &PendingPjsuaOp) -> String {
+    match op {
+        PendingPjsuaOp::PlayDirect { call_id, samples } => {
+            format!("PlayDirect {{ call_id: {}, samples: {} }}", call_id, samples.len())
+        }
+        PendingPjsuaOp::StartLoop { call_id, samples } => {
+            format!("StartLoop {{ call_id: {}, samples: {} }}", call_id, samples.len())
+        }
+        PendingPjsuaOp::StartStreaming { call_id, path, hangup_on_complete } => {
+            format!(
+                "StartStreaming {{ call_id: {}, path: {}, hangup_on_complete: {} }}",
+                call_id,
+                path.display(),
+                hangup_on_complete,
+            )
+        }
+        PendingPjsuaOp::StartTestTone { call_id } => {
+            format!("StartTestTone {{ call_id: {} }}", call_id)
+        }
+        PendingPjsuaOp::Hangup { call_id } => format!("Hangup {{ call_id: {} }}", call_id),
+        PendingPjsuaOp::ConnectFaxPort { call_id, fax_slot, call_conf_port, .. } => {
+            format!(
+                "ConnectFaxPort {{ call_id: {}, fax_slot: {:?}, call_conf_port: {:?} }}",
+                call_id, fax_slot, call_conf_port,
+            )
+        }
+    }
+}
+
 fn process_pending_pjsua_ops() {
     use super::ffi::direct_player::play_audio_to_call_direct_internal;
     use super::ffi::streaming_player::start_streaming_to_call;
@@ -334,7 +364,7 @@ fn process_pending_pjsua_ops() {
         if let Some(cid) = call_id
             && !is_call_valid(cid)
         {
-            tracing::warn!("Skipping stale op for dead call {}: {:?}", cid, op);
+            tracing::warn!("Skipping stale op for dead call {}: {}", cid, describe_op(&op));
             // For ConnectFaxPort, signal failure so the caller doesn't hang
             if let PendingPjsuaOp::ConnectFaxPort { done_tx, .. } = op {
                 let _ = done_tx.send(false);
