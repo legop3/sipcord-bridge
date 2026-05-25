@@ -449,18 +449,15 @@ fn process_sip_command(cmd: SipCommand, calls: &Arc<DashMap<CallId, CallState>>)
                 }
 
                 if auth_ok {
-                    // Add Expires header to the pre-built 200 OK
-                    let expires_str = format!("{}", pending.expires);
-                    let hdr_name = std::ffi::CString::new("Expires").unwrap();
-                    let hdr_value = std::ffi::CString::new(expires_str).unwrap();
-
-                    let name = pj_str(hdr_name.as_ptr() as *mut c_char);
-                    let value = pj_str(hdr_value.as_ptr() as *mut c_char);
-                    let hdr = pjsip_generic_string_hdr_create((*tdata).pool, &name, &value);
-                    if !hdr.is_null() {
-                        pj_list_insert_before(
-                            &mut (*(*tdata).msg).hdr as *mut pjsip_hdr as *mut pj_list_type,
-                            hdr as *mut pj_list_type,
+                    use register_handler::append_tdata_hdr;
+                    append_tdata_hdr(tdata, c"Expires", &pending.expires.to_string());
+                    // RFC 3261 §10.3: echo the client's binding back as Contact.
+                    // Required for strict clients like 3CX to accept registration.
+                    if let Some(ref uri) = pending.contact_uri {
+                        append_tdata_hdr(
+                            tdata,
+                            c"Contact",
+                            &format!("<{}>;expires={}", uri, pending.expires),
                         );
                     }
                 } else {

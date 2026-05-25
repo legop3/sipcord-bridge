@@ -10,7 +10,7 @@ use super::callbacks::{
 use super::ffi::types::*;
 use super::ffi::utils::pj_str_to_string;
 use pjsua::*;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::net::SocketAddr;
 use std::os::raw::c_char;
 use std::ptr;
@@ -32,12 +32,17 @@ pub struct PendingRegisterTsx {
     pub tsx: SendableTsx,
     pub tdata: SendableTdata,
     pub expires: u32,
+    /// Client's Contact URI, echoed back in the 200 OK per RFC 3261 §10.3.
+    /// Strict clients (3CX) treat the response as a forced-unregister when
+    /// their binding isn't listed.
+    pub contact_uri: Option<String>,
 }
 
 impl std::fmt::Debug for PendingRegisterTsx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PendingRegisterTsx")
             .field("expires", &self.expires)
+            .field("contact_uri", &self.contact_uri)
             .finish()
     }
 }
@@ -78,6 +83,46 @@ unsafe fn pj_list_init_hdr(hdr: *mut pjsip_hdr) {
     }
 }
 
+/// Create a generic string header in `pool`. Returns null on failure (alloc or
+/// interior-NUL in `value`). pjsip duplicates name/value into `pool`, so the
+/// caller's CStrings can be dropped immediately after this returns.
+#[inline]
+unsafe fn make_string_hdr(
+    pool: *mut pj_pool_t,
+    name: &CStr,
+    value: &str,
+) -> *mut pjsip_generic_string_hdr {
+    unsafe {
+        let Ok(value_c) = CString::new(value) else {
+            return ptr::null_mut();
+        };
+        let name_pj = pj_str(name.as_ptr() as *mut c_char);
+        let value_pj = pj_str(value_c.as_ptr() as *mut c_char);
+        pjsip_generic_string_hdr_create(pool, &name_pj, &value_pj)
+    }
+}
+
+/// Append a generic string header onto the message buffer in `tdata`,
+/// allocating from the tdata's own pool. Returns false on failure.
+#[inline]
+pub(super) unsafe fn append_tdata_hdr(
+    tdata: *mut pjsip_tx_data,
+    name: &CStr,
+    value: &str,
+) -> bool {
+    unsafe {
+        let hdr = make_string_hdr((*tdata).pool, name, value);
+        if hdr.is_null() {
+            return false;
+        }
+        pj_list_insert_before(
+            &mut (*(*tdata).msg).hdr as *mut pjsip_hdr as *mut pj_list_type,
+            hdr as *mut pj_list_type,
+        );
+        true
+    }
+}
+
 /// Send a simple stateless SIP response (no custom headers).
 unsafe fn send_simple_response(rdata: *mut pjsip_rx_data, status_code: u16, reason: &str) {
     unsafe {
@@ -97,30 +142,46 @@ unsafe fn send_simple_response(rdata: *mut pjsip_rx_data, status_code: u16, reas
     }
 }
 
-/// Send a stateless 200 OK with an Expires header.
-unsafe fn send_register_ok(rdata: *mut pjsip_rx_data, expires: u32) {
+/// Send a stateless 200 OK with Expires + Contact headers.
+///
+/// RFC 3261 §10.3 step 8 requires the registrar's 200 OK to enumerate the
+/// client's current bindings via Contact header(s). Strict clients like 3CX
+/// interpret a Contact-less response as "forced unregister" and tear down the
+/// trunk even though the binding was accepted server-side.
+unsafe fn send_register_ok(rdata: *mut pjsip_rx_data, expires: u32, contact_uri: Option<&str>) {
     unsafe {
         let endpt = pjsua_get_pjsip_endpt();
         if endpt.is_null() {
             return;
         }
 
-        let expires_str = format!("{}", expires);
-        let hdr_name = CString::new("Expires").unwrap();
-        let hdr_value = CString::new(expires_str).unwrap();
-
-        let pool = pjsua_pool_create(c"register_ok".as_ptr(), 512, 512);
+        let pool = pjsua_pool_create(c"register_ok".as_ptr(), 1024, 1024);
         if !pool.is_null() {
-            let name = pj_str(hdr_name.as_ptr() as *mut c_char);
-            let value = pj_str(hdr_value.as_ptr() as *mut c_char);
-            let hdr = pjsip_generic_string_hdr_create(pool, &name, &value);
+            let exp_hdr = make_string_hdr(pool, c"Expires", &expires.to_string());
+            let contact_hdr = match contact_uri {
+                Some(uri) => make_string_hdr(
+                    pool,
+                    c"Contact",
+                    &format!("<{}>;expires={}", uri, expires),
+                ),
+                None => ptr::null_mut(),
+            };
 
-            if !hdr.is_null() {
+            if !exp_hdr.is_null() {
                 let hdr_list =
                     pj_pool_alloc(pool, std::mem::size_of::<pjsip_hdr>()) as *mut pjsip_hdr;
                 if !hdr_list.is_null() {
                     pj_list_init_hdr(hdr_list);
-                    pj_list_insert_before(hdr_list as *mut pj_list_type, hdr as *mut pj_list_type);
+                    pj_list_insert_before(
+                        hdr_list as *mut pj_list_type,
+                        exp_hdr as *mut pj_list_type,
+                    );
+                    if !contact_hdr.is_null() {
+                        pj_list_insert_before(
+                            hdr_list as *mut pj_list_type,
+                            contact_hdr as *mut pj_list_type,
+                        );
+                    }
 
                     let status = pjsip_endpt_respond_stateless(
                         endpt,
@@ -143,7 +204,7 @@ unsafe fn send_register_ok(rdata: *mut pjsip_rx_data, expires: u32) {
             pj_pool_release(pool);
         }
 
-        // Fallback: respond without Expires header
+        // Fallback: respond without extra headers
         let status =
             pjsip_endpt_respond_stateless(endpt, rdata, 200, ptr::null(), ptr::null(), ptr::null());
         if status != pj_constants__PJ_SUCCESS as i32 {
@@ -176,6 +237,7 @@ unsafe fn detect_transport(rdata: *mut pjsip_rx_data) -> crate::services::regist
 unsafe fn create_register_tsx(
     rdata: *mut pjsip_rx_data,
     expires: u32,
+    contact_uri: Option<String>,
 ) -> Option<PendingRegisterTsx> {
     unsafe {
         let endpt = pjsua_get_pjsip_endpt();
@@ -208,6 +270,7 @@ unsafe fn create_register_tsx(
             tsx: SendableTsx(tsx),
             tdata: SendableTdata(tdata),
             expires,
+            contact_uri,
         })
     }
 }
@@ -345,7 +408,7 @@ pub unsafe extern "C" fn on_rx_request_cb(rdata: *mut pjsip_rx_data) -> pj_bool_
                             params.username,
                             ip_str
                         );
-                        send_register_ok(rdata, expires);
+                        send_register_ok(rdata, expires, contact_uri.as_deref());
                         // Send to async handler for registrar update
                         if let Some(tx) = REGISTER_EVENT_TX.get() {
                             let _ = tx.try_send(RegisterRequest {
@@ -390,7 +453,7 @@ pub unsafe extern "C" fn on_rx_request_cb(rdata: *mut pjsip_rx_data) -> pj_bool_
                             params.username,
                             ip_str
                         );
-                        if let Some(pending) = create_register_tsx(rdata, expires) {
+                        if let Some(pending) = create_register_tsx(rdata, expires, contact_uri.clone()) {
                             if let Some(tx) = REGISTER_EVENT_TX.get() {
                                 let _ = tx.try_send(RegisterRequest {
                                     digest_auth: params,
@@ -419,6 +482,7 @@ pub unsafe extern "C" fn on_rx_request_cb(rdata: *mut pjsip_rx_data) -> pj_bool_
                 ip_str,
                 params.username
             );
+            let contact_uri_for_response = contact_uri.clone();
             if let Some(tx) = REGISTER_EVENT_TX.get() {
                 let _ = tx.try_send(RegisterRequest {
                     digest_auth: params,
@@ -429,7 +493,7 @@ pub unsafe extern "C" fn on_rx_request_cb(rdata: *mut pjsip_rx_data) -> pj_bool_
                     pending_tsx: None,
                 });
             }
-            send_register_ok(rdata, expires);
+            send_register_ok(rdata, expires, contact_uri_for_response.as_deref());
         } else {
             // No Authorization header - send 401 challenge
             tracing::debug!(
