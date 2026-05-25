@@ -18,10 +18,8 @@ use tracing::{debug, info, warn};
 
 pub use streaming::{StreamingError, StreamingPlayer};
 
-/// Errors raised by sound loading and parsing.
 #[derive(thiserror::Error, Debug)]
 pub enum SoundError {
-    /// Failed to read the sound file from disk.
     #[error("failed to read sound file {path:?}: {source}")]
     Read {
         path: PathBuf,
@@ -29,7 +27,6 @@ pub enum SoundError {
         source: std::io::Error,
     },
 
-    /// Parse failure from the WAV/FLAC decoder.
     #[error("failed to parse audio for {name}: {source}")]
     Parse {
         name: String,
@@ -37,7 +34,6 @@ pub enum SoundError {
         source: AudioParseError,
     },
 
-    /// Sound's sample rate didn't match the bridge's configured rate.
     #[error("sound {name} has wrong sample rate: {got} Hz (expected {expected} Hz)")]
     WrongSampleRate {
         name: String,
@@ -45,11 +41,9 @@ pub enum SoundError {
         expected: u32,
     },
 
-    /// File header doesn't match any supported format (WAV / FLAC).
     #[error("unknown audio format for {name}: header bytes {header:02x?}")]
     UnknownFormat { name: String, header: Vec<u8> },
 
-    /// Streaming player setup failure.
     #[error(transparent)]
     Streaming(#[from] StreamingError),
 }

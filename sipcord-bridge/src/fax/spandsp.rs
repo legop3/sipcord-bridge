@@ -76,8 +76,6 @@ fn configure_t30(
     tiff_path: &str,
     callback_state: &mut FaxCallbackState,
 ) -> Result<(), FaxError> {
-    /// Local macro: tag a SpanDSP error with the operation name. Avoids
-    /// boilerplate at every setter call site.
     macro_rules! spandsp_err {
         ($op:expr) => {
             |e| FaxError::SpanDsp {

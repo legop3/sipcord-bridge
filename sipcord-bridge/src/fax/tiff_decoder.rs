@@ -12,8 +12,6 @@ use std::path::Path;
 use std::sync::OnceLock;
 use tracing::debug;
 
-/// Convenience: most failures in this module are malformed-TIFF conditions
-/// that map cleanly onto `FaxError::Tiff(String)`.
 macro_rules! tiff_bail {
     ($($arg:tt)*) => {
         return Err(FaxError::Tiff(format!($($arg)*)))

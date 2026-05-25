@@ -16,7 +16,6 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-/// Errors raised by the streaming player.
 #[derive(thiserror::Error, Debug)]
 pub enum StreamingError {
     #[error("failed to open streaming file {path:?}: {source}")]

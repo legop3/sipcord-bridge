@@ -120,8 +120,7 @@ impl EnvConfig {
         Ok(())
     }
 
-    /// Access the global `EnvConfig` (panics if `init()` was not called — a
-    /// programmer error, not a recoverable condition).
+    /// Access the global `EnvConfig`. Panics if `init()` was not called.
     pub fn global() -> &'static EnvConfig {
         ENV_CONFIG.get().unwrap_or_else(|| {
             panic!("EnvConfig not initialized — call EnvConfig::init() first")
@@ -335,8 +334,7 @@ impl AppConfig {
         })
     }
 
-    /// Get the global application config (panics if not initialized — a
-    /// programmer error: caller must `AppConfig::load(...)` first).
+    /// Get the global application config. Panics if `AppConfig::load(...)` was not called.
     pub fn global() -> &'static AppConfig {
         APP_CONFIG.get().unwrap_or_else(|| {
             panic!("AppConfig not initialized — call AppConfig::load() first")

@@ -1,22 +1,5 @@
-//! Safe(r) helpers around the pjsua/pjsip C-string and header-building idioms
-//! that recur across the SIP transport layer.
-//!
-//! Before this module existed, every callback that built a SIP header
-//! re-implemented the same pattern:
-//!
-//! ```ignore
-//! let name = CString::new("Contact").unwrap();
-//! let value = CString::new(runtime_str).unwrap();
-//! let name_pj = pj_str(name.as_ptr() as *mut c_char);
-//! let value_pj = pj_str(value.as_ptr() as *mut c_char);
-//! let hdr = pjsip_generic_string_hdr_create(pool, &name_pj, &value_pj);
-//! // ...
-//! ```
-//!
-//! That sprouted two unwraps per header (so any header value containing a NUL
-//! byte from upstream data would panic), repeated lifetime traps, and zero
-//! shared failure handling. The helpers in this module turn those calls into
-//! a single fallible call returning [`SipResponseError`].
+//! Helpers around the pjsua/pjsip C-string and header-building idioms that
+//! recur across the SIP transport layer.
 
 use crate::transport::sip::error::SipResponseError;
 use pjsua::*;
@@ -26,22 +9,13 @@ use std::ptr;
 
 /// Convert a [`CStr`] (typically a `c"..."` literal) into a [`pj_str_t`].
 ///
-/// Zero-cost — `pj_str` just wraps the pointer and length. The caller must
-/// keep the `CStr` alive for the `pj_str_t`'s usage window. For `&'static`
-/// literals (the common case) that's trivially satisfied.
+/// Caller must keep `s` alive for the resulting `pj_str_t`'s usage window.
 #[inline]
 pub unsafe fn pj_str_from_cstr(s: &CStr) -> pj_str_t {
     unsafe { pj_str(s.as_ptr() as *mut c_char) }
 }
 
-// A `pj_str_owned(&str) -> Result<(CString, pj_str_t), _>` helper was considered
-// but turned out unused: every runtime-string call site in this codebase ends
-// up either inside `make_string_hdr` (which does the conversion internally) or
-// in a function that already chains `CString::new(...).context("...")?` for a
-// site-specific error message. Add it back if a true caller appears.
-
-/// Initialise a `pjsip_hdr` as an empty list head (equivalent to the
-/// `pj_list_init` C macro).
+/// Initialise a `pjsip_hdr` as an empty list head.
 #[inline]
 pub unsafe fn pj_list_init_hdr(hdr: *mut pjsip_hdr) {
     unsafe {
@@ -52,11 +26,8 @@ pub unsafe fn pj_list_init_hdr(hdr: *mut pjsip_hdr) {
 
 /// Create a generic string header in `pool`.
 ///
-/// `name` is a static `CStr` (use `c"Contact"` etc); `value` is a runtime
-/// string that gets converted to a `CString` and duplicated into the pool
-/// by pjsip. The temporary `CString` is dropped before this returns;
-/// `pjsip_generic_string_hdr_create` uses `pj_strdup` internally to copy
-/// the bytes.
+/// pjsip duplicates `name` and `value` into the pool, so the temporary
+/// `CString` for `value` is dropped before this returns.
 pub unsafe fn make_string_hdr(
     pool: *mut pj_pool_t,
     name: &CStr,
@@ -93,17 +64,11 @@ pub unsafe fn append_tdata_hdr(
 
 /// Answer a pjsua call with N custom headers attached to the response.
 ///
-/// Wraps the recurring `pjsua_msg_data_init` + pool + header build +
-/// `pjsua_call_answer` dance used in 401 / 302 / 4xx code paths.
+/// The pool is intentionally NOT released — pjsua continues referencing the
+/// header data after `pjsua_call_answer` returns, so releasing here triggers
+/// use-after-free. Each call leaks ~512 bytes, reclaimed when pjsua shuts down.
 ///
-/// **The pool is intentionally NOT released.** pjsua may continue to reference
-/// the header data after `pjsua_call_answer` returns; releasing the pool here
-/// triggers use-after-free. Each call leaks ~512 bytes that's reclaimed when
-/// pjsua shuts down. (Tracking pools per-call and releasing them on call-end
-/// would be a cleaner fix; not in scope here.)
-///
-/// On error, the caller typically follows up with `pjsua_call_hangup` — this
-/// helper does not hang up on its own so the caller can choose the strategy.
+/// The caller is responsible for `pjsua_call_hangup` on Err.
 pub unsafe fn answer_call_with_headers(
     call_id: i32,
     status_code: u32,
@@ -120,7 +85,6 @@ pub unsafe fn answer_call_with_headers(
         if pool.is_null() {
             return Err(SipResponseError::PoolAlloc);
         }
-        // Intentionally leaked — see doc comment above.
 
         for (name, value) in headers {
             let hdr = make_string_hdr(pool, name, value)?;
@@ -141,12 +105,7 @@ pub unsafe fn answer_call_with_headers(
 
 /// Send a stateless SIP response with N string headers.
 ///
-/// Wraps the recurring `pjsua_pool_create` → list-head alloc → header
-/// build → `pjsip_endpt_respond_stateless` → `pj_pool_release` dance. Each
-/// header in `headers` is a `(name, value)` pair where `name` is typically
-/// a `c"..."` literal and `value` is any runtime string.
-///
-/// `reason` is the SIP reason phrase (e.g. `Some(c"Unauthorized")`) or
+/// `reason` is the SIP reason phrase (e.g. `Some(c"Unauthorized")`); pass
 /// `None` to let pjsip pick the default for `status_code`.
 pub unsafe fn respond_stateless_with_headers(
     rdata: *mut pjsip_rx_data,
@@ -165,8 +124,7 @@ pub unsafe fn respond_stateless_with_headers(
             return Err(SipResponseError::PoolAlloc);
         }
 
-        // Belt-and-braces: ensure the pool is released even if a step
-        // between here and the send returns Err via `?`.
+        // Closure so the pool gets released even if a step `?`-returns.
         let result =
             (|| -> Result<i32, SipResponseError> {
                 let hdr_list =

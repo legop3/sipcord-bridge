@@ -179,10 +179,7 @@ fn create_resampler() -> Async<f64> {
         window: WindowFunction::BlackmanHarris2,
     };
 
-    // 16kHz to 48kHz = ratio of 3.0, mono input, 320 samples per chunk (20ms at 16kHz).
-    // Params are static and known-good; if rubato rejects them it's a programmer
-    // error (e.g. ratio constants changed inconsistently) and the program can't
-    // run anyway — panic explicitly with the rubato error for diagnostics.
+    // 16kHz → 48kHz, mono, 320 samples per chunk (20ms at 16kHz).
     Async::new_sinc(
         48000.0 / 16000.0,
         1.1,
@@ -675,9 +672,7 @@ impl DiscordVoiceConnection {
                     // This allows the pjsua audio thread to bypass tokio entirely
                     let audio_sender = RegisteredAudioSender::new(channel_id, producer);
 
-                    // Create shared timestamp for health tracking. The system
-                    // clock would have to be set before 1970 to produce Err
-                    // here; default to 0 in that case rather than panic.
+                    // Create shared timestamp for health tracking
                     let now_ms = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()

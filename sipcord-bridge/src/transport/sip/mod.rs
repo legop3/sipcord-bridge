@@ -207,8 +207,6 @@ impl SipTransport {
             }
         });
 
-        // JoinError -> log only; pjsua loop errors are already logged inside the
-        // spawned task.
         if let Err(e) = pjsua_handle.await {
             tracing::error!("pjsua event loop join error: {}", e);
         }

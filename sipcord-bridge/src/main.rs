@@ -20,9 +20,6 @@ use sipcord_bridge::transport::sip::SipTransport;
 
 #[tokio::main]
 async fn main() -> Result<(), BridgeError> {
-    // Pre-init failures here are programmer errors (missing rustls feature
-    // flag, double-init of the global crypto provider) — panicking is the
-    // right behaviour and there's no caller that could recover.
     if rustls::crypto::ring::default_provider()
         .install_default()
         .is_err()

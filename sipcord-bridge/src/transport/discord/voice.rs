@@ -181,10 +181,8 @@ impl Read for StreamingAudioSource {
             return Ok(buf.len());
         }
 
-        // Read samples from ring buffer directly into output buffer.
         // `samples_to_read <= samples_available` by construction, so this
-        // should never error; if rtrb's state ever desyncs, log + silence
-        // rather than panic on the audio thread.
+        // should never error; on rtrb desync, silence rather than panic.
         let chunk = match consumer.read_chunk(samples_to_read) {
             Ok(c) => c,
             Err(e) => {
