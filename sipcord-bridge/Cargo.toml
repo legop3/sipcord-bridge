@@ -4,7 +4,7 @@ version = "2.1.2"
 edition = "2024"
 authors = ["coral <jonas@jonasbengtson.se>"]
 license = "AGPL-3.0-only"
-repository = "https://github.com/coral/sipcord-bridge"
+repository = "https://github.com/legop3/sipcord-bridge"
 homepage = "https://sipcord.net/"
 publish = false
 

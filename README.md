@@ -74,7 +74,7 @@ Create a `docker-compose.yml`:
 ```yaml
 services:
   sipcord-bridge:
-    image: ghcr.io/coral/sipcord-bridge:latest
+    image: ghcr.io/legop3/sipcord-bridge:latest
     container_name: sipcord-bridge
     restart: always
     network_mode: host
@@ -94,6 +94,15 @@ docker logs -f sipcord-bridge
 ```
 
 You should see it load the dialplan and start listening.
+
+Images are published by GitHub Actions to `ghcr.io/legop3/sipcord-bridge`
+on pushes to `master`, version tags like `v2.1.2`, and manual workflow runs.
+If the package is private, make it public in the GitHub package settings or
+log in to GHCR from your OMV host before pulling.
+
+For a FreePBX trunk, point the trunk host at your Docker host and send the
+extension digits you configured in `dialplan.toml`. The static router ignores
+SIP usernames/passwords and routes only by the dialed extension.
 
 ### 4b. Build from source
 

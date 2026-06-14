@@ -1,0 +1,10 @@
+.git
+.github
+target
+**/target
+.env
+.env.*
+!.env.example
+docker-compose.yml
+compose.yml
+*.log
