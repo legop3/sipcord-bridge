@@ -23,7 +23,7 @@ use crate::services::snowflake::Snowflake;
 use crate::services::sound::{SoundManager, create_sound_manager};
 use crate::transport::discord::{
     DiscordEvent, DiscordVoiceConnection, SharedDiscordClient, register_discord_to_sip_producer,
-    unregister_discord_to_sip_producer,
+    set_bot_nickname, unregister_discord_to_sip_producer,
 };
 use crate::transport::sip::{
     CONF_SAMPLE_RATE, CallId, SipCommand, SipEvent, cleanup_channel_port,
@@ -36,8 +36,10 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 use dashmap::{DashMap, DashSet};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
@@ -222,6 +224,7 @@ impl BridgeCoordinator {
                     SipEvent::IncomingCall {
                         call_id,
                         digest_auth,
+                        caller_id,
                         extension,
                         source_ip,
                     } => {
@@ -270,8 +273,15 @@ impl BridgeCoordinator {
                         let ctx = ctx.clone();
 
                         tokio::spawn(async move {
-                            handle_incoming_call(ctx, call_id, *digest_auth, extension, source_ip)
-                                .await;
+                            handle_incoming_call(
+                                ctx,
+                                call_id,
+                                *digest_auth,
+                                caller_id,
+                                extension,
+                                source_ip,
+                            )
+                            .await;
                         });
                     }
 
@@ -1036,6 +1046,7 @@ async fn handle_incoming_call(
     ctx: BridgeContext,
     call_id: CallId,
     digest_auth: crate::transport::sip::DigestAuthParams,
+    caller_id: String,
     extension: String,
     source_ip: Option<std::net::IpAddr>,
 ) {
@@ -1193,6 +1204,7 @@ async fn handle_incoming_call(
                     health_check_notify,
                 },
                 call_id,
+                caller_id,
                 extension,
                 menu,
             )
@@ -1342,6 +1354,8 @@ async fn handle_incoming_call(
                     backend.on_call_started(&info).await;
                 });
 
+                set_bot_nickname(&bot_token, guild_id, &caller_id).await;
+
                 // Answer call first, then play join sound
                 let _ = sip_cmd_tx.send(SipCommand::Answer { call_id });
                 play_discord_join(call_id, &sound_manager, &sip_cmd_tx).await;
@@ -1424,6 +1438,8 @@ async fn handle_incoming_call(
                             backend.on_call_started(&info).await;
                         });
 
+                        set_bot_nickname(&bot_token, guild_id, &caller_id).await;
+
                         // Answer call first, then play join sound
                         let _ = sip_cmd_tx.send(SipCommand::Answer { call_id });
                         play_discord_join(call_id, &sound_manager, &sip_cmd_tx).await;
@@ -1486,11 +1502,13 @@ struct DynamicGuildOption {
 struct DynamicChannelOption {
     channel_id: Snowflake,
     name: String,
+    user_count: usize,
 }
 
 async fn handle_menu_call(
     ctx: MenuCallContext,
     call_id: CallId,
+    caller_id: String,
     extension: String,
     menu: MenuRoute,
 ) {
@@ -1536,7 +1554,12 @@ async fn handle_menu_call(
             None => return,
         };
 
-    let channels = match fetch_discord_voice_channels(ctx.backend.bot_token(), guild.guild_id).await
+    let channels = match fetch_discord_voice_channels(
+        ctx.backend.bot_token(),
+        guild.guild_id,
+        &ctx.shared_discord,
+    )
+    .await
     {
         Ok(channels) if !channels.is_empty() => channels,
         Ok(_) => {
@@ -1576,7 +1599,7 @@ async fn handle_menu_call(
     };
 
     ctx.dtmf_waiters.remove(&call_id);
-    connect_menu_selection(ctx, call_id, extension, guild, selected).await;
+    connect_menu_selection(ctx, call_id, caller_id, extension, guild, selected).await;
 }
 
 async fn select_guild_from_menu(
@@ -1649,7 +1672,7 @@ async fn select_channel_from_menu(
         let prompt = build_option_prompt(
             &intro,
             page_items,
-            |channel| clean_tts_label(&channel.name),
+            channel_tts_label,
             page,
             channels.len(),
         );
@@ -1848,6 +1871,7 @@ async fn fetch_discord_guilds(
 async fn fetch_discord_voice_channels(
     bot_token: &str,
     guild_id: Snowflake,
+    shared_discord: &SharedDiscordClient,
 ) -> Result<Vec<DynamicChannelOption>, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::new();
     let url = format!("https://discord.com/api/v10/guilds/{}/channels", guild_id);
@@ -1865,14 +1889,29 @@ async fn fetch_discord_voice_channels(
         .filter(|channel| channel.kind == 2)
         .filter_map(|channel| {
             let channel_id = channel.id.parse::<Snowflake>().ok()?;
+            let user_count = shared_discord.voice_channel_user_count(guild_id, channel_id);
             Some(DynamicChannelOption {
                 channel_id,
                 name: channel.name,
+                user_count,
             })
         })
         .collect();
-    channels.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    channels.sort_by(|a, b| {
+        b.user_count
+            .cmp(&a.user_count)
+            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+    });
     Ok(channels)
+}
+
+fn channel_tts_label(channel: &DynamicChannelOption) -> String {
+    let name = clean_tts_label(&channel.name);
+    match channel.user_count {
+        0 => name,
+        1 => format!("{name}, with 1 person"),
+        count => format!("{name}, with {count} people"),
+    }
 }
 
 async fn play_tts_prompt(
@@ -1897,17 +1936,24 @@ async fn synthesize_tts_samples(
     let raw_path = std::env::temp_dir().join(format!("sipcord-tts-{}-{}-raw.wav", call_id, stamp));
     let out_path = std::env::temp_dir().join(format!("sipcord-tts-{}-{}.wav", call_id, stamp));
 
-    let espeak_status = Command::new("espeak-ng")
-        .arg("-v")
-        .arg("en+f3")
-        .arg("-w")
+    let mut piper = Command::new("piper")
+        .arg("--model")
+        .arg("/opt/piper-voices/en_US-amy-medium.onnx")
+        .arg("--output_file")
         .arg(&raw_path)
-        .arg(text)
-        .status()
-        .await?;
-    if !espeak_status.success() {
+        .arg("--speaker_rate")
+        .arg("0.4")
+        .stdin(Stdio::piped())
+        .spawn()?;
+
+    if let Some(mut stdin) = piper.stdin.take() {
+        stdin.write_all(text.as_bytes()).await?;
+    }
+
+    let piper_status = piper.wait().await?;
+    if !piper_status.success() {
         let _ = tokio::fs::remove_file(&raw_path).await;
-        return Err(format!("espeak-ng exited with status {}", espeak_status).into());
+        return Err(format!("piper exited with status {}", piper_status).into());
     }
 
     let ffmpeg_status = Command::new("ffmpeg")
@@ -1953,6 +1999,7 @@ async fn synthesize_tts_samples(
 async fn connect_menu_selection(
     ctx: MenuCallContext,
     call_id: CallId,
+    caller_id: String,
     extension: String,
     guild: DynamicGuildOption,
     selected: DynamicChannelOption,
@@ -2067,6 +2114,7 @@ async fn connect_menu_selection(
         tokio::spawn(async move {
             backend.on_call_started(&info).await;
         });
+        set_bot_nickname(ctx.backend.bot_token(), guild_id, &caller_id).await;
         play_discord_join(call_id, &ctx.sound_manager, &ctx.sip_cmd_tx).await;
         return;
     }
@@ -2134,6 +2182,7 @@ async fn connect_menu_selection(
             tokio::spawn(async move {
                 backend.on_call_started(&info).await;
             });
+            set_bot_nickname(ctx.backend.bot_token(), guild_id, &caller_id).await;
             play_discord_join(call_id, &ctx.sound_manager, &ctx.sip_cmd_tx).await;
         }
         Err(e) => {

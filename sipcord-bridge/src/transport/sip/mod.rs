@@ -42,6 +42,8 @@ pub enum SipEvent {
         call_id: CallId,
         /// SIP Digest auth parameters (boxed to reduce enum size)
         digest_auth: Box<DigestAuthParams>,
+        /// Caller ID / SIP username from the From header.
+        caller_id: String,
         /// Extension being called (from To header)
         extension: String,
         /// Source IP address of the caller
@@ -265,7 +267,7 @@ fn run_pjsua_loop(
         }),
         on_call_authenticated: Box::new({
             let event_tx = event_tx.clone();
-            move |call_id, digest_auth, extension, source_ip| {
+            move |call_id, digest_auth, caller_id, extension, source_ip| {
                 info!(
                     "Call {} authenticated: user={}",
                     call_id, digest_auth.username
@@ -274,6 +276,7 @@ fn run_pjsua_loop(
                 let _ = event_tx.send(SipEvent::IncomingCall {
                     call_id,
                     digest_auth: Box::new(digest_auth),
+                    caller_id,
                     extension,
                     source_ip,
                 });

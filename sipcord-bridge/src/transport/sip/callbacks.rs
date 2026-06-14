@@ -476,8 +476,13 @@ pub unsafe extern "C" fn on_incoming_call_cb(
             if let Some(callbacks) = CALLBACKS.get()
                 && let Some(ref handlers) = *callbacks.lock()
             {
-                (handlers.on_incoming_call)(call_id, sip_username, extension.clone(), source_ip);
-                (handlers.on_call_authenticated)(call_id, params, extension, source_ip);
+                (handlers.on_incoming_call)(
+                    call_id,
+                    sip_username.clone(),
+                    extension.clone(),
+                    source_ip,
+                );
+                (handlers.on_call_authenticated)(call_id, params, sip_username, extension, source_ip);
             }
         } else {
             // No Authorization header - send 401 challenge

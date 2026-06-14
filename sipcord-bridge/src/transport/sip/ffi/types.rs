@@ -158,7 +158,7 @@ pub struct DigestAuthParams {
 pub struct CallbackHandlers {
     pub on_incoming_call: Box<dyn Fn(CallId, String, String, Option<IpAddr>) + Send + Sync>,
     pub on_call_authenticated:
-        Box<dyn Fn(CallId, DigestAuthParams, String, Option<IpAddr>) + Send + Sync>,
+        Box<dyn Fn(CallId, DigestAuthParams, String, String, Option<IpAddr>) + Send + Sync>,
     pub on_dtmf: Box<dyn Fn(CallId, char) + Send + Sync>,
     pub on_call_ended: Box<dyn Fn(CallId) + Send + Sync>,
     /// Audio frame callback: (channel_id, samples, sample_rate)
