@@ -522,8 +522,15 @@ impl BridgeCoordinator {
                     req.call_id, req.discord_username
                 );
 
-                // Look up the user's SIP contact from the registrar
-                let contacts = if let Some(ref registrar) = outbound_registrar {
+                // Either dial the explicitly configured SIP URI, or look up
+                // registered contacts for the Discord username.
+                let contacts = if let Some(sip_uri) = req.sip_uri.clone() {
+                    vec![(
+                        sip_uri,
+                        String::new(),
+                        crate::services::registrar::SipTransport::Udp,
+                    )]
+                } else if let Some(ref registrar) = outbound_registrar {
                     registrar.get_contacts_for_discord_user(&req.discord_username)
                 } else {
                     Vec::new()
@@ -549,6 +556,16 @@ impl BridgeCoordinator {
 
                 // Ring ALL registered contacts simultaneously
                 for (contact_uri, source_addr, transport) in &contacts {
+                    if req.sip_uri.is_some() {
+                        let _ = outbound_sip_cmd_tx.send(SipCommand::MakeOutboundCall {
+                            tracking_id: req.call_id.clone(),
+                            sip_uri: contact_uri.clone(),
+                            caller_display_name: Some(req.caller_username.clone()),
+                            fork_total,
+                        });
+                        continue;
+                    }
+
                     // Extract the user part from the Contact URI (e.g., "sip:3001@10.0.1.151:5060" -> "3001")
                     // The contact_uri has the correct SIP username/extension; source_addr is the NAT'd public address
                     let user_part = contact_uri

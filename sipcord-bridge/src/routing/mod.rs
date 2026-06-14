@@ -13,6 +13,7 @@ pub struct OutboundCallRequest {
     pub channel_id: String,
     pub bot_token: String,
     pub caller_username: String,
+    pub sip_uri: Option<String>,
     pub created_at: std::time::Instant,
 }
 

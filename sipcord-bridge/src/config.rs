@@ -65,6 +65,12 @@ fn default_tls_refresh() -> u64 {
 fn default_dialplan_path() -> String {
     "./dialplan.toml".to_string()
 }
+fn default_discord_outbound_sip_port() -> u16 {
+    5060
+}
+fn default_discord_outbound_sip_transport() -> String {
+    "udp".to_string()
+}
 
 /// All environment variables consumed by the bridge, deserialized once at startup.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -106,6 +112,50 @@ pub struct EnvConfig {
     pub discord_bot_token: Option<String>,
     #[serde(default = "default_dialplan_path")]
     pub dialplan_path: String,
+    pub discord_outbound_sip_host: Option<String>,
+    #[serde(default = "default_discord_outbound_sip_port")]
+    pub discord_outbound_sip_port: u16,
+    #[serde(default = "default_discord_outbound_sip_transport")]
+    pub discord_outbound_sip_transport: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundSipTransport {
+    Udp,
+    Tcp,
+    Tls,
+}
+
+impl OutboundSipTransport {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "udp" => Some(Self::Udp),
+            "tcp" => Some(Self::Tcp),
+            "tls" | "sips" => Some(Self::Tls),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordOutboundSipConfig {
+    pub host: String,
+    pub port: u16,
+    pub transport: OutboundSipTransport,
+}
+
+impl DiscordOutboundSipConfig {
+    pub fn build_sip_uri(&self, extension: &str) -> String {
+        match self.transport {
+            OutboundSipTransport::Udp => {
+                format!("sip:{}@{}:{};transport=udp", extension, self.host, self.port)
+            }
+            OutboundSipTransport::Tcp => {
+                format!("sip:{}@{}:{};transport=tcp", extension, self.host, self.port)
+            }
+            OutboundSipTransport::Tls => format!("sips:{}@{}:{}", extension, self.host, self.port),
+        }
+    }
 }
 
 impl EnvConfig {
@@ -170,6 +220,17 @@ impl EnvConfig {
     /// Return the SIP public host, falling back to `"0.0.0.0"` when unset.
     pub fn sip_public_host_or_default(&self) -> &str {
         self.sip_public_host.as_deref().unwrap_or("0.0.0.0")
+    }
+
+    /// Build outbound Discord->SIP call config when enabled.
+    pub fn discord_outbound_sip_config(&self) -> Option<DiscordOutboundSipConfig> {
+        let host = self.discord_outbound_sip_host.clone()?;
+        let transport = OutboundSipTransport::parse(&self.discord_outbound_sip_transport)?;
+        Some(DiscordOutboundSipConfig {
+            host,
+            port: self.discord_outbound_sip_port,
+            transport,
+        })
     }
 
     /// Return the resolved DATA_DIR path, applying the smart fallback:
@@ -466,6 +527,9 @@ mod tests {
             tls_refresh_interval: 3600,
             discord_bot_token: None,
             dialplan_path: "./dialplan.toml".to_string(),
+            discord_outbound_sip_host: None,
+            discord_outbound_sip_port: 5060,
+            discord_outbound_sip_transport: "udp".to_string(),
         };
         assert_eq!(env.resolved_data_dir(), ".");
     }
@@ -490,6 +554,9 @@ mod tests {
             tls_refresh_interval: 3600,
             discord_bot_token: None,
             dialplan_path: "./dialplan.toml".to_string(),
+            discord_outbound_sip_host: None,
+            discord_outbound_sip_port: 5060,
+            discord_outbound_sip_transport: "udp".to_string(),
         };
         assert_eq!(env.resolved_data_dir(), "/tmp");
     }
@@ -514,6 +581,9 @@ mod tests {
             tls_refresh_interval: 3600,
             discord_bot_token: None,
             dialplan_path: "./dialplan.toml".to_string(),
+            discord_outbound_sip_host: None,
+            discord_outbound_sip_port: 5060,
+            discord_outbound_sip_transport: "udp".to_string(),
         };
         let tls = env.to_tls_config();
         assert_eq!(tls.cert_dir, PathBuf::from("/data/certs"));
@@ -532,6 +602,38 @@ mod tests {
             PathBuf::from("/etc/ssl/sipcord/bridge.crt")
         );
         assert_eq!(tls.key_path(), PathBuf::from("/etc/ssl/sipcord/bridge.key"));
+    }
+
+    #[test]
+    fn test_discord_outbound_sip_config_uri() {
+        let env = EnvConfig {
+            data_dir: "/data".to_string(),
+            config_path: "./config.toml".to_string(),
+            bridge_id: "br_test".to_string(),
+            sounds_dir: "./wav".to_string(),
+            dev_mode: false,
+            sip_public_host: None,
+            sip_port: 5060,
+            rtp_port_start: 10000,
+            rtp_port_end: 15000,
+            rtp_public_ip: None,
+            sip_local_host: None,
+            sip_local_cidr: None,
+            tls_cert_dir: None,
+            tls_port: 5061,
+            tls_refresh_interval: 3600,
+            discord_bot_token: None,
+            dialplan_path: "./dialplan.toml".to_string(),
+            discord_outbound_sip_host: Some("192.168.0.25".to_string()),
+            discord_outbound_sip_port: 5060,
+            discord_outbound_sip_transport: "udp".to_string(),
+        };
+
+        let outbound = env.discord_outbound_sip_config().unwrap();
+        assert_eq!(
+            outbound.build_sip_uri("1101"),
+            "sip:1101@192.168.0.25:5060;transport=udp"
+        );
     }
 
     #[test]

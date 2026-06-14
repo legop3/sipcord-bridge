@@ -15,7 +15,7 @@ use sipcord_bridge::BridgeError;
 use sipcord_bridge::call::BridgeCoordinator;
 use sipcord_bridge::config::{APP_CONFIG, AppConfig, ConfigError, EnvConfig, SipConfig};
 use sipcord_bridge::routing::static_router::StaticBackend;
-use sipcord_bridge::transport::discord::SharedDiscordClient;
+use sipcord_bridge::transport::discord::{DiscordOutboundCallConfig, SharedDiscordClient};
 use sipcord_bridge::transport::sip::SipTransport;
 
 #[tokio::main]
@@ -58,7 +58,12 @@ async fn run_static_router() -> Result<(), BridgeError> {
 
     // Load dialplan
     let dialplan_path = PathBuf::from(&EnvConfig::global().dialplan_path);
-    let backend = Arc::new(StaticBackend::load(&dialplan_path, bot_token.clone())?);
+    let (outbound_request_tx, outbound_request_rx) = tokio::sync::mpsc::unbounded_channel();
+    let backend = Arc::new(StaticBackend::load(
+        &dialplan_path,
+        bot_token.clone(),
+        outbound_request_rx,
+    )?);
 
     // Create SIP transport (no TLS for static router)
     let sip_transport = SipTransport::new(sip_config.clone(), None);
@@ -77,7 +82,14 @@ async fn run_static_router() -> Result<(), BridgeError> {
     });
 
     // Create shared Discord client
-    let shared_discord = SharedDiscordClient::new(&bot_token).await?;
+    let outbound_call_config = EnvConfig::global()
+        .discord_outbound_sip_config()
+        .map(|sip| DiscordOutboundCallConfig {
+            sip,
+            request_tx: outbound_request_tx,
+            bot_token: bot_token.clone(),
+        });
+    let shared_discord = SharedDiscordClient::new(&bot_token, outbound_call_config).await?;
     info!("Shared Discord client initialized");
 
     let bridge = BridgeCoordinator::new(

@@ -23,8 +23,8 @@ This was written a mix between myself and claude, sure, some of it's big slop bu
 ## Self-host setup notes
 
 These notes cover the static-router Docker setup. The bridge maps inbound SIP
-extension digits to Discord voice channels; it does not currently expose a
-static Discord command for placing outbound calls to SIP phones.
+extension digits to Discord voice channels, and can also place outbound calls
+from Discord into a PBX extension when outbound SIP target settings are enabled.
 
 ### Prerequisites
 
@@ -70,6 +70,9 @@ Create a `.env` file:
 DISCORD_BOT_TOKEN=your_bot_token_here
 SIP_PUBLIC_HOST=192.168.0.100
 RTP_PUBLIC_IP=192.168.0.100
+DISCORD_OUTBOUND_SIP_HOST=192.168.0.25
+DISCORD_OUTBOUND_SIP_PORT=5060
+DISCORD_OUTBOUND_SIP_TRANSPORT=udp
 ```
 
 Set both IPs to the address other SIP devices use to reach the bridge. For
@@ -77,6 +80,10 @@ example, if FreePBX is `192.168.0.25` and this container runs on an OMV host at
 `192.168.0.100`, use `192.168.0.100`. Do not use `0.0.0.0` here; this value is
 advertised in SIP Contact/SDP headers, and callers must be able to route back to
 it.
+
+Set `DISCORD_OUTBOUND_SIP_HOST` to the PBX or SIP server that should receive
+Discord-originated extension calls. For a FreePBX box at `192.168.0.25`, that
+means `DISCORD_OUTBOUND_SIP_HOST=192.168.0.25`.
 
 Create a `docker-compose.yml`:
 
@@ -184,7 +191,32 @@ challenge, a second INVITE with auth, a `200 OK`, and an `ACK`. If the call ends
 after about 32 seconds, check that `SIP_PUBLIC_HOST` and `RTP_PUBLIC_IP` are set
 to the bridge host address, not the FreePBX address and not `0.0.0.0`.
 
-### 4c. Build from source
+### 4c. Discord -> extension calling
+
+If `DISCORD_OUTBOUND_SIP_HOST` is set, the bot registers a `/call` slash command
+in each guild it is connected to.
+
+Usage:
+
+```text
+/call extension:1101
+```
+
+Behavior:
+- The user running `/call` must already be in a Discord voice channel.
+- The bot uses that voice channel as the bridge destination.
+- The bridge dials the requested extension through the configured PBX target, for
+  example `sip:1101@192.168.0.25:5060;transport=udp`.
+- When the SIP side answers, the phone call is connected to the Discord voice
+  channel where the command was run.
+
+Current scope:
+- `/call` is implemented for the static self-host backend.
+- It dials a configured PBX/SIP host by extension.
+- It does not yet include a Discord `/hangup` command or rich status updates
+  back into Discord after the initial slash command reply.
+
+### 4d. Build from source
 
 Requires Rust nightly (for `portable_simd`) and system dependencies for pjproject (OpenSSL, Opus, libtiff, etc). See the `Dockerfile` for the full list.
 
@@ -217,6 +249,9 @@ Dial `1000` (or whatever you put in `dialplan.toml`) and you should hear the bot
 | `RTP_PORT_START` | `10000` | Start of RTP port range |
 | `RTP_PORT_END` | `15000` | End of RTP port range |
 | `RTP_PUBLIC_IP` | *(local address if unset)* | Routable IP advertised in SDP for RTP media |
+| `DISCORD_OUTBOUND_SIP_HOST` | *(disabled if unset)* | PBX/SIP host used by Discord `/call` |
+| `DISCORD_OUTBOUND_SIP_PORT` | `5060` | Port for Discord-originated outbound SIP calls |
+| `DISCORD_OUTBOUND_SIP_TRANSPORT` | `udp` | Transport for Discord-originated outbound SIP calls: `udp`, `tcp`, or `tls` |
 | `CONFIG_PATH` | `./config.toml` | Path to config.toml |
 | `DIALPLAN_PATH` | `./dialplan.toml` | Path to dialplan.toml |
 | `SOUNDS_DIR` | `./wav` | Path to sound files directory |

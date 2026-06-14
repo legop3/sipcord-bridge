@@ -14,9 +14,11 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::config::ConfigError;
@@ -39,15 +41,20 @@ struct Dialplan {
 ///
 /// Routes calls by looking up the dialed extension in a TOML dialplan file.
 /// No authentication is performed — any caller dialing a known extension is connected.
-/// Outbound calls are not supported.
+/// Outbound calls can also be queued by the self-host Discord `/call` command.
 pub struct StaticBackend {
     bot_token: String,
     extensions: HashMap<String, ExtensionTarget>,
+    outbound_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<OutboundCallRequest>>>,
 }
 
 impl StaticBackend {
     /// Load the dialplan from a TOML file. `bot_token` comes from the environment.
-    pub fn load(path: &Path, bot_token: String) -> Result<Self, ConfigError> {
+    pub fn load(
+        path: &Path,
+        bot_token: String,
+        outbound_rx: tokio::sync::mpsc::UnboundedReceiver<OutboundCallRequest>,
+    ) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
             source,
@@ -72,6 +79,7 @@ impl StaticBackend {
         Ok(Self {
             bot_token,
             extensions: dialplan.extensions,
+            outbound_rx: Arc::new(Mutex::new(outbound_rx)),
         })
     }
 }
@@ -115,8 +123,7 @@ impl Backend for StaticBackend {
     fn report_call_status(&self, _call_id: &str, _status: &str) {}
 
     async fn next_outbound_request(&self) -> Option<OutboundCallRequest> {
-        // Static router doesn't support outbound calls — block forever
-        std::future::pending().await
+        self.outbound_rx.lock().await.recv().await
     }
 }
 
@@ -136,7 +143,8 @@ mod tests {
         let path = dir.join("test_dialplan.toml");
         std::fs::write(&path, toml_content).unwrap();
 
-        let backend = StaticBackend::load(&path, "test_token".to_string()).unwrap();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let backend = StaticBackend::load(&path, "test_token".to_string(), rx).unwrap();
         assert_eq!(backend.extensions.len(), 2);
         assert!(backend.extensions.contains_key("1000"));
         assert!(backend.extensions.contains_key("2000"));
@@ -153,7 +161,8 @@ mod tests {
         let path = dir.join("test_route.toml");
         std::fs::write(&path, toml_content).unwrap();
 
-        let backend = StaticBackend::load(&path, "tok".to_string()).unwrap();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let backend = StaticBackend::load(&path, "tok".to_string(), rx).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -182,7 +191,8 @@ mod tests {
         let path = dir.join("test_route_unknown.toml");
         std::fs::write(&path, toml_content).unwrap();
 
-        let backend = StaticBackend::load(&path, "tok".to_string()).unwrap();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let backend = StaticBackend::load(&path, "tok".to_string(), rx).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -207,7 +217,8 @@ mod tests {
         let path = dir.join("test_bad.toml");
         std::fs::write(&path, "this is not valid toml [[[").unwrap();
 
-        let result = StaticBackend::load(&path, "tok".to_string());
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = StaticBackend::load(&path, "tok".to_string(), rx);
         assert!(result.is_err());
     }
 }

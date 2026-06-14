@@ -1,6 +1,8 @@
 mod voice;
 
 use crate::audio::simd;
+use crate::config::DiscordOutboundSipConfig;
+use crate::routing::OutboundCallRequest;
 use crate::services::snowflake::Snowflake;
 use audioadapter::Adapter;
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
@@ -12,7 +14,11 @@ use rubato::{
     Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
     WindowFunction,
 };
-use serenity::all::{ChannelId, Client, Context, EventHandler, FullEvent, GatewayIntents, GuildId};
+use serenity::all::{
+    ChannelId, Client, Command, CommandInteraction, CommandOptionType, Context, CreateCommand,
+    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage, EventHandler,
+    FullEvent, GatewayIntents, GuildId, Interaction,
+};
 use serenity::async_trait;
 use serenity::secrets::Token;
 use songbird::driver::DecodeMode;
@@ -45,6 +51,9 @@ pub enum DiscordError {
         attempts: u32,
         last_error: String,
     },
+
+    #[error("failed to register Discord slash command: {0}")]
+    CommandRegistration(String),
 }
 
 // Direct audio path: SIP audio thread → Discord
@@ -493,13 +502,23 @@ pub struct SharedDiscordClient {
     _client_handle: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Clone)]
+pub struct DiscordOutboundCallConfig {
+    pub sip: DiscordOutboundSipConfig,
+    pub request_tx: tokio::sync::mpsc::UnboundedSender<OutboundCallRequest>,
+    pub bot_token: String,
+}
+
 impl SharedDiscordClient {
     /// Create the shared Discord client. Call once at bridge startup.
     ///
     /// This opens a single gateway WebSocket connection that stays alive for
     /// the bridge's lifetime. The returned Songbird manager is used by all
     /// voice connections to join/leave channels.
-    pub async fn new(bot_token: &str) -> Result<Arc<Self>, DiscordError> {
+    pub async fn new(
+        bot_token: &str,
+        outbound_call_config: Option<DiscordOutboundCallConfig>,
+    ) -> Result<Arc<Self>, DiscordError> {
         info!("Creating shared Discord client (single gateway connection)");
 
         let intents = GatewayIntents::GUILDS | GatewayIntents::GUILD_VOICE_STATES;
@@ -515,7 +534,10 @@ impl SharedDiscordClient {
             .map_err(|e| DiscordError::InvalidToken(format!("{e}")))?;
 
         let mut client = Client::builder(token, intents)
-            .event_handler(Arc::new(SharedClientEventHandler { ready_tx }))
+            .event_handler(Arc::new(SharedClientEventHandler {
+                ready_tx,
+                outbound_call_config,
+            }))
             .voice_manager(songbird.clone())
             .await?;
 
@@ -565,20 +587,173 @@ impl SharedDiscordClient {
 /// Serenity event handler for the shared client
 struct SharedClientEventHandler {
     ready_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<u64>>>>,
+    outbound_call_config: Option<DiscordOutboundCallConfig>,
 }
 
 #[async_trait]
 impl EventHandler for SharedClientEventHandler {
-    async fn dispatch(&self, _ctx: &Context, event: &FullEvent) {
-        if let FullEvent::Ready { data_about_bot, .. } = event {
-            info!(
-                "Shared Discord bot connected as {} (ID: {})",
-                data_about_bot.user.name, data_about_bot.user.id
-            );
-            if let Some(tx) = self.ready_tx.lock().await.take() {
-                let _ = tx.send(data_about_bot.user.id.get());
+    async fn dispatch(&self, ctx: &Context, event: &FullEvent) {
+        match event {
+            FullEvent::Ready { data_about_bot, .. } => {
+                info!(
+                    "Shared Discord bot connected as {} (ID: {})",
+                    data_about_bot.user.name, data_about_bot.user.id
+                );
+                if let Some(tx) = self.ready_tx.lock().await.take() {
+                    let _ = tx.send(data_about_bot.user.id.get());
+                }
+
+                if self.outbound_call_config.is_some() {
+                    for guild_status in &data_about_bot.guilds {
+                        if let Err(e) = register_call_command(ctx, guild_status.id).await {
+                            error!(
+                                "Failed to register /call command for guild {}: {}",
+                                guild_status.id, e
+                            );
+                        }
+                    }
+                }
+            }
+            FullEvent::InteractionCreate { interaction } => {
+                if let Some(ref cfg) = self.outbound_call_config
+                    && let Interaction::Command(command) = interaction
+                    && command.data.name == "call"
+                {
+                    handle_call_command(ctx, command, cfg).await;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn register_call_command(ctx: &Context, guild_id: GuildId) -> Result<(), serenity::Error> {
+    let command = CreateCommand::new("call")
+        .description("Call a SIP/PBX extension from your current voice channel")
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::String,
+                "extension",
+                "The extension to dial",
+            )
+            .required(true),
+        );
+
+    Command::create_guild_command(&ctx.http, guild_id, command).await?;
+    info!("Registered /call command for guild {}", guild_id);
+    Ok(())
+}
+
+async fn handle_call_command(
+    ctx: &Context,
+    command: &CommandInteraction,
+    cfg: &DiscordOutboundCallConfig,
+) {
+    let response = match build_outbound_request(ctx, command, cfg) {
+        Ok(req) => {
+            let extension = req.discord_username.clone();
+            match cfg.request_tx.send(req) {
+                Ok(()) => format!("Dialing extension `{}` from your current voice channel.", extension),
+                Err(_) => "Outbound call queue is unavailable right now.".to_string(),
             }
         }
+        Err(msg) => msg,
+    };
+
+    if let Err(e) = command
+        .create_response(
+            ctx,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(response)
+                    .ephemeral(true),
+            ),
+        )
+        .await
+    {
+        error!("Failed to respond to /call interaction: {}", e);
+    }
+}
+
+fn build_outbound_request(
+    ctx: &Context,
+    command: &CommandInteraction,
+    cfg: &DiscordOutboundCallConfig,
+) -> Result<OutboundCallRequest, String> {
+    let extension = command
+        .data
+        .options
+        .iter()
+        .find(|opt| opt.name == "extension")
+        .and_then(|opt| opt.value.as_str())
+        .ok_or_else(|| "Missing extension.".to_string())?
+        .trim()
+        .to_string();
+
+    if !is_safe_extension(&extension) {
+        return Err(
+            "Extension contains unsupported characters. Use digits or simple SIP-safe extension text."
+                .to_string(),
+        );
+    }
+
+    let guild_id = command
+        .guild_id
+        .ok_or_else(|| "This command only works inside a server.".to_string())?;
+    let guild = ctx
+        .cache
+        .guild(guild_id)
+        .ok_or_else(|| "Guild is not available in cache yet. Try again in a moment.".to_string())?;
+    let voice_channel_id = guild
+        .voice_states
+        .get(&command.user.id)
+        .and_then(|state| state.channel_id)
+        .ok_or_else(|| "Join a voice channel first, then run `/call` there.".to_string())?;
+
+    let caller_username = command
+        .member
+        .as_ref()
+        .and_then(|member| member.nick.clone())
+        .or_else(|| command.user.global_name.clone())
+        .unwrap_or_else(|| command.user.name.clone());
+
+    Ok(OutboundCallRequest {
+        call_id: format!("discord-{}-{}", command.id, extension),
+        discord_username: extension.clone(),
+        guild_id: guild_id.get().to_string(),
+        channel_id: voice_channel_id.get().to_string(),
+        bot_token: cfg.bot_token.clone(),
+        caller_username,
+        sip_uri: Some(cfg.sip.build_sip_uri(&extension)),
+        created_at: std::time::Instant::now(),
+    })
+}
+
+fn is_safe_extension(extension: &str) -> bool {
+    !extension.is_empty()
+        && extension.len() <= 64
+        && extension.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '*' | '#' | '+' | '-' | '_' | '.')
+        })
+}
+
+#[cfg(test)]
+mod outbound_command_tests {
+    use super::is_safe_extension;
+
+    #[test]
+    fn safe_extensions_are_accepted() {
+        assert!(is_safe_extension("1101"));
+        assert!(is_safe_extension("*98"));
+        assert!(is_safe_extension("queue-1"));
+    }
+
+    #[test]
+    fn unsafe_extensions_are_rejected() {
+        assert!(!is_safe_extension(""));
+        assert!(!is_safe_extension("1101@pbx"));
+        assert!(!is_safe_extension("11 01"));
+        assert!(!is_safe_extension("1101/../../"));
     }
 }
 
