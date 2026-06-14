@@ -17,7 +17,7 @@ use rubato::{
 use serenity::all::{
     ButtonStyle, ChannelId, Client, CommandInteraction, CommandOptionType,
     ComponentInteraction, Context, CreateActionRow, CreateButton, CreateCommand,
-    CreateCommandOption, CreateEmbed, CreateInteractionResponse,
+    CreateCommandOption, CreateComponent, CreateEmbed, CreateInteractionResponse,
     CreateInteractionResponseMessage, EventHandler, FullEvent, GatewayIntents, GuildId,
     Interaction,
 };
@@ -784,9 +784,9 @@ async fn handle_directory_button(
         component
             .member
             .as_ref()
-            .and_then(|member| member.nick.clone()),
-        component.user.global_name.clone(),
-        component.user.name.clone(),
+            .and_then(|member| member.nick.as_ref().map(ToString::to_string)),
+        component.user.global_name.as_ref().map(ToString::to_string),
+        component.user.name.to_string(),
         &entry.extension,
         &format!("directory-{}", component.id),
         cfg,
@@ -840,7 +840,7 @@ fn build_directory_response(entries: &[PhoneDirectoryEntry]) -> CreateInteractio
                     .style(ButtonStyle::Primary)
             })
             .collect();
-        rows.push(CreateActionRow::Buttons(buttons));
+        rows.push(CreateComponent::ActionRow(CreateActionRow::Buttons(buttons)));
     }
 
     CreateInteractionResponseMessage::new()
@@ -887,9 +887,9 @@ fn build_outbound_request(
         command
             .member
             .as_ref()
-            .and_then(|member| member.nick.clone()),
-        command.user.global_name.clone(),
-        command.user.name.clone(),
+            .and_then(|member| member.nick.as_ref().map(ToString::to_string)),
+        command.user.global_name.as_ref().map(ToString::to_string),
+        command.user.name.to_string(),
         &extension,
         &command.id.to_string(),
         cfg,
