@@ -1594,7 +1594,7 @@ async fn select_guild_from_menu(
         let prompt = build_option_prompt(
             "Select a Discord server.",
             page_items,
-            |guild| guild.name.as_str(),
+            |guild| clean_tts_label(&guild.name),
             page,
             guilds.len(),
         );
@@ -1651,11 +1651,11 @@ async fn select_channel_from_menu(
     let mut attempts = 0u8;
     loop {
         let page_items = page_slice(channels, page);
-        let intro = format!("Select a voice channel in {}.", guild.name);
+        let intro = format!("Select a voice channel in {}.", clean_tts_label(&guild.name));
         let prompt = build_option_prompt(
             &intro,
             page_items,
-            |channel| channel.name.as_str(),
+            |channel| clean_tts_label(&channel.name),
             page,
             channels.len(),
         );
@@ -1716,7 +1716,7 @@ fn has_next_page(total: usize, page: usize) -> bool {
 fn build_option_prompt<T>(
     intro: &str,
     items: &[T],
-    label: impl Fn(&T) -> &str,
+    label: impl Fn(&T) -> String,
     page: usize,
     total: usize,
 ) -> String {
@@ -1732,6 +1732,54 @@ fn build_option_prompt<T>(
     }
     prompt.push_str(" Press pound to repeat.");
     prompt
+}
+
+fn clean_tts_label(label: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_space = false;
+
+    for ch in label.chars() {
+        let replacement = if is_tts_skipped_symbol(ch) || ch.is_control() {
+            Some(' ')
+        } else {
+            match ch {
+                '_' | '-' | '|' | '/' | '\\' | ':' | ';' | ',' | '.' | '#' | '[' | ']' | '('
+                | ')' | '{' | '}' => Some(' '),
+                _ => Some(ch),
+            }
+        };
+
+        if let Some(ch) = replacement {
+            if ch.is_whitespace() {
+                if !last_was_space {
+                    out.push(' ');
+                    last_was_space = true;
+                }
+            } else {
+                out.push(ch);
+                last_was_space = false;
+            }
+        }
+    }
+
+    let cleaned = out.trim();
+    if cleaned.is_empty() {
+        "unnamed".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+fn is_tts_skipped_symbol(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x200D
+            | 0x20E3
+            | 0xFE00..=0xFE0F
+            | 0x2500..=0x257F
+            | 0x2600..=0x27BF
+            | 0x1F000..=0x1FAFF
+    )
 }
 
 async fn wait_for_menu_digit(
@@ -1846,6 +1894,8 @@ async fn synthesize_tts_samples(
     let out_path = std::env::temp_dir().join(format!("sipcord-tts-{}-{}.wav", call_id, stamp));
 
     let espeak_status = Command::new("espeak-ng")
+        .arg("-v")
+        .arg("en+f3")
         .arg("-w")
         .arg(&raw_path)
         .arg(text)

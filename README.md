@@ -72,9 +72,10 @@ timeout_seconds = 10
 max_attempts = 3
 ```
 
-The menu uses `espeak-ng` for local text-to-speech. Press `#` to repeat the
-current menu page, `9` for the next page when available, and `*` for the
-previous page when available.
+The menu uses `espeak-ng` for local text-to-speech with a female English voice.
+Emoji and common Discord channel separators are skipped in spoken names. Press
+`#` to repeat the current menu page, `9` for the next page when available, and
+`*` for the previous page when available.
 
 ### 4a. Run with Docker (recommended)
 
