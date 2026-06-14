@@ -530,8 +530,20 @@ fn make_outbound_call(
 ) -> Result<CallId, SipCallError> {
     unsafe {
         use self::ffi::pj_str::make_string_hdr;
+        let outbound_uri = if auto_answer {
+            if sip_uri.contains("intercom=true") {
+                sip_uri.to_string()
+            } else if let Some((base, params)) = sip_uri.split_once(';') {
+                format!("{base};intercom=true;{params}")
+            } else {
+                format!("{sip_uri};intercom=true")
+            }
+        } else {
+            sip_uri.to_string()
+        };
+
         let uri =
-            std::ffi::CString::new(sip_uri).map_err(|source| SipCallError::InvalidString {
+            std::ffi::CString::new(outbound_uri).map_err(|source| SipCallError::InvalidString {
                 field: "sip_uri",
                 source,
             })?;
@@ -565,7 +577,8 @@ fn make_outbound_call(
                 call_info as *mut ::pjsua::pj_list_type,
             );
 
-            let alert_info = make_string_hdr(pool, c"Alert-Info", "Ring Answer")
+            let alert_info =
+                make_string_hdr(pool, c"Alert-Info", "<http://127.0.0.1>;info=Ring Answer")
                 .map_err(|_| SipCallError::MakeCall(-1))?;
             ::pjsua::pj_list_insert_before(
                 &mut msg_data_ptr.hdr_list as *mut _ as *mut ::pjsua::pj_list_type,

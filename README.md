@@ -88,9 +88,9 @@ means `DISCORD_OUTBOUND_SIP_HOST=192.168.0.25`.
 
 Discord-originated calls dial the requested extension directly by default. The
 bridge also attaches common auto-answer headers (`Call-Info:
-<uri>;answer-after=0` and `Alert-Info: Ring Answer`) to Discord-originated
-outbound calls so auto-answer phones can behave more like FreePBX intercom
-targets.
+<uri>;answer-after=0` and `Alert-Info: <http://127.0.0.1>;info=Ring Answer`)
+to Discord-originated outbound calls, and appends `intercom=true` to the SIP
+URI, so auto-answer phones can behave more like FreePBX intercom targets.
 
 Create a `docker-compose.yml`:
 
@@ -215,8 +215,9 @@ Behavior:
 - The bridge dials the requested extension through the configured PBX target.
 - It dials the requested extension directly, for example
   `sip:1101@192.168.0.25:5060;transport=udp`.
-- Discord-originated outbound calls also include common auto-answer headers so
-  phones configured for that behavior can answer immediately.
+- Discord-originated outbound calls also include auto-answer headers and append
+  `intercom=true` to the SIP URI so phones configured for that behavior can
+  answer immediately.
 - When the SIP side answers, the phone call is connected to the Discord voice
   channel where the command was run.
 
