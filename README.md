@@ -78,10 +78,12 @@ timeout_seconds = 10
 max_attempts = 3
 ```
 
-The menu uses `espeak-ng` for local text-to-speech with a female English voice.
-Emoji and common Discord channel separators are skipped in spoken names. Press
-`#` to repeat the current menu page, `9` for the next page when available, and
-`*` for the previous page when available.
+The menu uses Piper for local text-to-speech with a bundled English female
+voice. Emoji and common Discord channel separators are skipped in spoken names.
+Voice channels with people in them are read first and include the number of
+people present, excluding the bot itself. Empty voice channels are read by name.
+Press `#` to repeat the current menu page, `9` for the next page when
+available, and `*` for the previous page when available.
 
 You can also add a phone directory for Discord-originated calls. These entries
 show up in `/directory` as buttons. Clicking one dials that extension from your
@@ -278,7 +280,7 @@ Current scope:
 
 ### 4d. Build from source
 
-Requires Rust nightly (for `portable_simd`) and system dependencies for pjproject (OpenSSL, Opus, libtiff, etc). See the `Dockerfile` for the full list.
+Requires Rust nightly (for `portable_simd`) and system dependencies for pjproject (OpenSSL, Opus, libtiff, etc). Dynamic menu TTS also requires the `piper` binary and a Piper voice model at `/opt/piper-voices/en_US-amy-medium.onnx`. See the `Dockerfile` for the full list.
 
 ```bash
 cargo run --release -p sipcord-bridge

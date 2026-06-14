@@ -28,7 +28,7 @@ use songbird::tracks::PlayMode;
 use songbird::{
     Config, CoreEvent, Event, EventContext, EventHandler as VoiceEventHandler, Songbird, TrackEvent,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -501,7 +501,61 @@ pub enum DiscordEvent {
 pub struct SharedDiscordClient {
     songbird: Arc<Songbird>,
     bot_user_id: AtomicU64,
+    voice_state_tracker: Arc<VoiceStateTracker>,
     _client_handle: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct VoiceStateTracker {
+    users: Mutex<HashMap<Snowflake, (Snowflake, Snowflake)>>,
+    channels: Mutex<HashMap<(Snowflake, Snowflake), HashSet<Snowflake>>>,
+}
+
+impl VoiceStateTracker {
+    fn update(
+        &self,
+        user_id: Snowflake,
+        guild_id: Option<Snowflake>,
+        channel_id: Option<Snowflake>,
+    ) {
+        let mut users = self.users.lock();
+        let mut channels = self.channels.lock();
+
+        if let Some((old_guild_id, old_channel_id)) = users.remove(&user_id)
+            && let Some(users_in_channel) = channels.get_mut(&(old_guild_id, old_channel_id))
+        {
+            users_in_channel.remove(&user_id);
+            if users_in_channel.is_empty() {
+                channels.remove(&(old_guild_id, old_channel_id));
+            }
+        }
+
+        if let (Some(guild_id), Some(channel_id)) = (guild_id, channel_id) {
+            users.insert(user_id, (guild_id, channel_id));
+            channels
+                .entry((guild_id, channel_id))
+                .or_default()
+                .insert(user_id);
+        }
+    }
+
+    fn count_excluding(
+        &self,
+        guild_id: Snowflake,
+        channel_id: Snowflake,
+        excluded_user_id: Snowflake,
+    ) -> usize {
+        self.channels
+            .lock()
+            .get(&(guild_id, channel_id))
+            .map(|users| {
+                users
+                    .iter()
+                    .filter(|user_id| **user_id != excluded_user_id)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Clone)]
@@ -529,6 +583,7 @@ impl SharedDiscordClient {
 
         let songbird_config = Config::default().decode_mode(DecodeMode::Decode(Default::default()));
         let songbird = Songbird::serenity_from_config(songbird_config);
+        let voice_state_tracker = Arc::new(VoiceStateTracker::default());
 
         let (ready_tx, ready_rx) = oneshot::channel::<u64>();
         let ready_tx = Arc::new(tokio::sync::Mutex::new(Some(ready_tx)));
@@ -541,6 +596,7 @@ impl SharedDiscordClient {
             .event_handler(Arc::new(SharedClientEventHandler {
                 ready_tx,
                 outbound_call_config,
+                voice_state_tracker: voice_state_tracker.clone(),
             }))
             .voice_manager(songbird.clone())
             .await?;
@@ -573,6 +629,7 @@ impl SharedDiscordClient {
         Ok(Arc::new(Self {
             songbird,
             bot_user_id: AtomicU64::new(bot_user_id),
+            voice_state_tracker,
             _client_handle: client_handle,
         }))
     }
@@ -586,12 +643,19 @@ impl SharedDiscordClient {
     pub fn bot_user_id(&self) -> Snowflake {
         Snowflake::new(self.bot_user_id.load(Ordering::Relaxed))
     }
+
+    /// Count users in a voice channel, excluding this bot if it is present.
+    pub fn voice_channel_user_count(&self, guild_id: Snowflake, channel_id: Snowflake) -> usize {
+        self.voice_state_tracker
+            .count_excluding(guild_id, channel_id, self.bot_user_id())
+    }
 }
 
 /// Serenity event handler for the shared client
 struct SharedClientEventHandler {
     ready_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<u64>>>>,
     outbound_call_config: Option<DiscordOutboundCallConfig>,
+    voice_state_tracker: Arc<VoiceStateTracker>,
 }
 
 #[async_trait]
@@ -636,7 +700,59 @@ impl EventHandler for SharedClientEventHandler {
                     }
                 }
             }
+            FullEvent::GuildCreate { guild, .. } => {
+                let guild_id = Snowflake::new(guild.id.get());
+                for voice_state in guild.voice_states.values() {
+                    self.voice_state_tracker.update(
+                        Snowflake::new(voice_state.user_id.get()),
+                        Some(guild_id),
+                        voice_state.channel_id.map(|id| Snowflake::new(id.get())),
+                    );
+                }
+            }
+            FullEvent::VoiceStateUpdate { new, .. } => {
+                self.voice_state_tracker.update(
+                    Snowflake::new(new.user_id.get()),
+                    new.guild_id.map(|id| Snowflake::new(id.get())),
+                    new.channel_id.map(|id| Snowflake::new(id.get())),
+                );
+            }
             _ => {}
+        }
+    }
+}
+
+/// Best-effort bot nickname update for a guild.
+pub async fn set_bot_nickname(bot_token: &str, guild_id: Snowflake, display_name: &str) {
+    let nickname = call_nickname(display_name);
+    let url = format!(
+        "https://discord.com/api/v10/guilds/{}/members/@me",
+        guild_id
+    );
+
+    let result = reqwest::Client::new()
+        .patch(url)
+        .header("Authorization", format!("Bot {}", bot_token))
+        .json(&serde_json::json!({ "nick": nickname }))
+        .send()
+        .await;
+
+    match result {
+        Ok(response) if response.status().is_success() => {
+            debug!(
+                "Set bot nickname in guild {} while calling {}",
+                guild_id, display_name
+            );
+        }
+        Ok(response) => {
+            warn!(
+                "Failed to set bot nickname in guild {}: HTTP {}",
+                guild_id,
+                response.status()
+            );
+        }
+        Err(e) => {
+            warn!("Failed to set bot nickname in guild {}: {}", guild_id, e);
         }
     }
 }
@@ -834,38 +950,12 @@ async fn set_call_nickname(
     let Some(guild_id) = guild_id else {
         return;
     };
-
-    let nickname = call_nickname(display_name);
-    let url = format!(
-        "https://discord.com/api/v10/guilds/{}/members/@me",
-        guild_id.get()
-    );
-
-    let result = reqwest::Client::new()
-        .patch(url)
-        .header("Authorization", format!("Bot {}", cfg.bot_token))
-        .json(&serde_json::json!({ "nick": nickname }))
-        .send()
-        .await;
-
-    match result {
-        Ok(response) if response.status().is_success() => {
-            debug!(
-                "Set bot nickname in guild {} while calling {}",
-                guild_id, display_name
-            );
-        }
-        Ok(response) => {
-            warn!(
-                "Failed to set bot nickname in guild {}: HTTP {}",
-                guild_id,
-                response.status()
-            );
-        }
-        Err(e) => {
-            warn!("Failed to set bot nickname in guild {}: {}", guild_id, e);
-        }
-    }
+    set_bot_nickname(
+        &cfg.bot_token,
+        Snowflake::new(guild_id.get()),
+        display_name,
+    )
+    .await;
 }
 
 fn call_nickname(display_name: &str) -> String {

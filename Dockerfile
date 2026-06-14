@@ -115,9 +115,20 @@ RUN apt-get update && apt-get install -y \
     libopus0 \
     libtiff6 \
     libjpeg62-turbo \
-    espeak-ng \
+    curl \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/piper /opt/piper-voices && \
+    curl -fL https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz \
+        | tar -xzf - -C /opt && \
+    printf '#!/bin/sh\nLD_LIBRARY_PATH=/opt/piper exec /opt/piper/piper "$@"\n' \
+        > /usr/local/bin/piper && \
+    chmod +x /usr/local/bin/piper && \
+    curl -fL -o /opt/piper-voices/en_US-amy-medium.onnx \
+        https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx && \
+    curl -fL -o /opt/piper-voices/en_US-amy-medium.onnx.json \
+        https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json
 
 WORKDIR /app
 
