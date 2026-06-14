@@ -17,6 +17,16 @@ pub struct OutboundCallRequest {
     pub created_at: std::time::Instant,
 }
 
+/// Hangup request from the backend (e.g., Discord /hangup command)
+#[derive(Debug, Clone)]
+pub struct HangupCallRequest {
+    pub request_id: String,
+    pub guild_id: String,
+    pub channel_id: String,
+    pub requested_by: String,
+    pub created_at: std::time::Instant,
+}
+
 /// Result of routing an incoming SIP call
 pub enum RouteDecision {
     /// Connect to this Discord voice channel
@@ -104,4 +114,7 @@ pub trait Backend: Send + Sync {
 
     /// Get the next outbound call request (None if backend doesn't support outbound)
     async fn next_outbound_request(&self) -> Option<OutboundCallRequest>;
+
+    /// Get the next hangup request (None if backend doesn't support hangup control)
+    async fn next_hangup_request(&self) -> Option<HangupCallRequest>;
 }

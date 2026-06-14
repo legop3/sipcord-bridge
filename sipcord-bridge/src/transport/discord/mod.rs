@@ -2,7 +2,7 @@ mod voice;
 
 use crate::audio::simd;
 use crate::config::DiscordOutboundSipConfig;
-use crate::routing::OutboundCallRequest;
+use crate::routing::{HangupCallRequest, OutboundCallRequest};
 use crate::services::snowflake::Snowflake;
 use audioadapter::Adapter;
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
@@ -506,6 +506,7 @@ pub struct SharedDiscordClient {
 pub struct DiscordOutboundCallConfig {
     pub sip: DiscordOutboundSipConfig,
     pub request_tx: tokio::sync::mpsc::UnboundedSender<OutboundCallRequest>,
+    pub hangup_tx: tokio::sync::mpsc::UnboundedSender<HangupCallRequest>,
     pub bot_token: String,
 }
 
@@ -605,9 +606,9 @@ impl EventHandler for SharedClientEventHandler {
 
                 if self.outbound_call_config.is_some() {
                     for guild_status in &data_about_bot.guilds {
-                        if let Err(e) = register_call_command(ctx, guild_status.id).await {
+                        if let Err(e) = register_call_commands(ctx, guild_status.id).await {
                             error!(
-                                "Failed to register /call command for guild {}: {}",
+                                "Failed to register call commands for guild {}: {}",
                                 guild_status.id, e
                             );
                         }
@@ -617,9 +618,12 @@ impl EventHandler for SharedClientEventHandler {
             FullEvent::InteractionCreate { interaction, .. } => {
                 if let Some(ref cfg) = self.outbound_call_config
                     && let Interaction::Command(command) = interaction
-                    && command.data.name == "call"
                 {
-                    handle_call_command(ctx, command, cfg).await;
+                    match command.data.name.as_str() {
+                        "call" => handle_call_command(ctx, command, cfg).await,
+                        "hangup" => handle_hangup_command(ctx, command, cfg).await,
+                        _ => {}
+                    }
                 }
             }
             _ => {}
@@ -627,8 +631,8 @@ impl EventHandler for SharedClientEventHandler {
     }
 }
 
-async fn register_call_command(ctx: &Context, guild_id: GuildId) -> Result<(), serenity::Error> {
-    let command = CreateCommand::new("call")
+async fn register_call_commands(ctx: &Context, guild_id: GuildId) -> Result<(), serenity::Error> {
+    let call_command = CreateCommand::new("call")
         .description("Call a SIP/PBX extension from your current voice channel")
         .add_option(
             CreateCommandOption::new(
@@ -639,8 +643,12 @@ async fn register_call_command(ctx: &Context, guild_id: GuildId) -> Result<(), s
             .required(true),
         );
 
-    guild_id.create_command(&ctx.http, command).await?;
-    info!("Registered /call command for guild {}", guild_id);
+    let hangup_command = CreateCommand::new("hangup")
+        .description("Hang up active SIP calls in your current voice channel");
+
+    guild_id.create_command(&ctx.http, call_command).await?;
+    guild_id.create_command(&ctx.http, hangup_command).await?;
+    info!("Registered /call and /hangup commands for guild {}", guild_id);
     Ok(())
 }
 
@@ -653,7 +661,10 @@ async fn handle_call_command(
         Ok(req) => {
             let extension = req.discord_username.clone();
             match cfg.request_tx.send(req) {
-                Ok(()) => format!("Dialing extension `{}` from your current voice channel.", extension),
+                Ok(()) => format!(
+                    "Dialing extension `{}` from your current voice channel.",
+                    extension
+                ),
                 Err(_) => "Outbound call queue is unavailable right now.".to_string(),
             }
         }
@@ -672,6 +683,34 @@ async fn handle_call_command(
         .await
     {
         error!("Failed to respond to /call interaction: {}", e);
+    }
+}
+
+async fn handle_hangup_command(
+    ctx: &Context,
+    command: &CommandInteraction,
+    cfg: &DiscordOutboundCallConfig,
+) {
+    let response = match build_hangup_request(ctx, command) {
+        Ok(req) => match cfg.hangup_tx.send(req) {
+            Ok(()) => "Hanging up active calls in your current voice channel.".to_string(),
+            Err(_) => "Hangup queue is unavailable right now.".to_string(),
+        },
+        Err(msg) => msg,
+    };
+
+    if let Err(e) = command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(response)
+                    .ephemeral(true),
+            ),
+        )
+        .await
+    {
+        error!("Failed to respond to /hangup interaction: {}", e);
     }
 }
 
@@ -697,18 +736,7 @@ fn build_outbound_request(
         );
     }
 
-    let guild_id = command
-        .guild_id
-        .ok_or_else(|| "This command only works inside a server.".to_string())?;
-    let guild = ctx
-        .cache
-        .guild(guild_id)
-        .ok_or_else(|| "Guild is not available in cache yet. Try again in a moment.".to_string())?;
-    let voice_channel_id = guild
-        .voice_states
-        .get(&command.user.id)
-        .and_then(|state| state.channel_id)
-        .ok_or_else(|| "Join a voice channel first, then run `/call` there.".to_string())?;
+    let (guild_id, voice_channel_id) = current_voice_channel(ctx, command, "/call")?;
 
     let caller_username = command
         .member
@@ -727,6 +755,49 @@ fn build_outbound_request(
         sip_uri: Some(cfg.sip.build_sip_uri(&extension)),
         created_at: std::time::Instant::now(),
     })
+}
+
+fn build_hangup_request(
+    ctx: &Context,
+    command: &CommandInteraction,
+) -> Result<HangupCallRequest, String> {
+    let (guild_id, voice_channel_id) = current_voice_channel(ctx, command, "/hangup")?;
+    let requested_by = command
+        .member
+        .as_ref()
+        .and_then(|member| member.nick.clone())
+        .or_else(|| command.user.global_name.clone())
+        .unwrap_or_else(|| command.user.name.clone())
+        .to_string();
+
+    Ok(HangupCallRequest {
+        request_id: format!("hangup-{}", command.id),
+        guild_id: guild_id.get().to_string(),
+        channel_id: voice_channel_id.get().to_string(),
+        requested_by,
+        created_at: std::time::Instant::now(),
+    })
+}
+
+fn current_voice_channel(
+    ctx: &Context,
+    command: &CommandInteraction,
+    command_name: &str,
+) -> Result<(GuildId, ChannelId), String> {
+    let guild_id = command
+        .guild_id
+        .ok_or_else(|| "This command only works inside a server.".to_string())?;
+    let guild = ctx
+        .cache
+        .guild(guild_id)
+        .ok_or_else(|| "Guild is not available in cache yet. Try again in a moment.".to_string())?;
+    let voice_channel_id = guild
+        .voice_states
+        .get(&command.user.id)
+        .and_then(|state| state.channel_id)
+        .ok_or_else(|| format!("Join a voice channel first, then run `{command_name}` there."))?;
+
+    Ok((guild_id, voice_channel_id))
 }
 
 fn is_safe_extension(extension: &str) -> bool {

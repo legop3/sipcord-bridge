@@ -22,7 +22,9 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::config::ConfigError;
-use crate::routing::{Backend, CallError, CallStartedInfo, OutboundCallRequest, RouteDecision};
+use crate::routing::{
+    Backend, CallError, CallStartedInfo, HangupCallRequest, OutboundCallRequest, RouteDecision,
+};
 use crate::services::snowflake::Snowflake;
 use crate::transport::sip::DigestAuthParams;
 
@@ -46,6 +48,7 @@ pub struct StaticBackend {
     bot_token: String,
     extensions: HashMap<String, ExtensionTarget>,
     outbound_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<OutboundCallRequest>>>,
+    hangup_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<HangupCallRequest>>>,
 }
 
 impl StaticBackend {
@@ -54,6 +57,7 @@ impl StaticBackend {
         path: &Path,
         bot_token: String,
         outbound_rx: tokio::sync::mpsc::UnboundedReceiver<OutboundCallRequest>,
+        hangup_rx: tokio::sync::mpsc::UnboundedReceiver<HangupCallRequest>,
     ) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
@@ -80,6 +84,7 @@ impl StaticBackend {
             bot_token,
             extensions: dialplan.extensions,
             outbound_rx: Arc::new(Mutex::new(outbound_rx)),
+            hangup_rx: Arc::new(Mutex::new(hangup_rx)),
         })
     }
 }
@@ -125,6 +130,10 @@ impl Backend for StaticBackend {
     async fn next_outbound_request(&self) -> Option<OutboundCallRequest> {
         self.outbound_rx.lock().await.recv().await
     }
+
+    async fn next_hangup_request(&self) -> Option<HangupCallRequest> {
+        self.hangup_rx.lock().await.recv().await
+    }
 }
 
 #[cfg(test)]
@@ -144,7 +153,9 @@ mod tests {
         std::fs::write(&path, toml_content).unwrap();
 
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let backend = StaticBackend::load(&path, "test_token".to_string(), rx).unwrap();
+        let (_hangup_tx, hangup_rx) = tokio::sync::mpsc::unbounded_channel();
+        let backend =
+            StaticBackend::load(&path, "test_token".to_string(), rx, hangup_rx).unwrap();
         assert_eq!(backend.extensions.len(), 2);
         assert!(backend.extensions.contains_key("1000"));
         assert!(backend.extensions.contains_key("2000"));
@@ -162,7 +173,8 @@ mod tests {
         std::fs::write(&path, toml_content).unwrap();
 
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let backend = StaticBackend::load(&path, "tok".to_string(), rx).unwrap();
+        let (_hangup_tx, hangup_rx) = tokio::sync::mpsc::unbounded_channel();
+        let backend = StaticBackend::load(&path, "tok".to_string(), rx, hangup_rx).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -192,7 +204,8 @@ mod tests {
         std::fs::write(&path, toml_content).unwrap();
 
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let backend = StaticBackend::load(&path, "tok".to_string(), rx).unwrap();
+        let (_hangup_tx, hangup_rx) = tokio::sync::mpsc::unbounded_channel();
+        let backend = StaticBackend::load(&path, "tok".to_string(), rx, hangup_rx).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -218,7 +231,8 @@ mod tests {
         std::fs::write(&path, "this is not valid toml [[[").unwrap();
 
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let result = StaticBackend::load(&path, "tok".to_string(), rx);
+        let (_hangup_tx, hangup_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = StaticBackend::load(&path, "tok".to_string(), rx, hangup_rx);
         assert!(result.is_err());
     }
 }

@@ -553,7 +553,6 @@ impl BridgeCoordinator {
                         tracking_id: req.call_id.clone(),
                         sip_uri,
                         caller_display_name: Some(req.caller_username.clone()),
-                        auto_answer: true,
                         fork_total,
                     });
                     outbound_backend.report_call_status(&req.call_id, "ringing");
@@ -586,12 +585,55 @@ impl BridgeCoordinator {
                         tracking_id: req.call_id.clone(),
                         sip_uri,
                         caller_display_name: Some(req.caller_username.clone()),
-                        auto_answer: false,
                         fork_total,
                     });
                 }
 
                 outbound_backend.report_call_status(&req.call_id, "ringing");
+            }
+        });
+
+        // Handle hangup requests from the backend (Discord /hangup)
+        let hangup_backend = self.backend.clone();
+        let hangup_bridges = self.bridges.clone();
+        let hangup_sip_cmd_tx = self.sip_cmd_tx.clone();
+
+        let hangup_handle = tokio::spawn(async move {
+            while let Some(req) = hangup_backend.next_hangup_request().await {
+                let channel_id = match req.channel_id.parse::<Snowflake>() {
+                    Ok(channel_id) => channel_id,
+                    Err(e) => {
+                        warn!(
+                            "Invalid /hangup channel id {} for request {}: {}",
+                            req.channel_id, req.request_id, e
+                        );
+                        continue;
+                    }
+                };
+
+                let call_ids: Vec<CallId> = hangup_bridges
+                    .get(&channel_id)
+                    .map(|bridge| bridge.sip_calls.iter().copied().collect())
+                    .unwrap_or_default();
+
+                if call_ids.is_empty() {
+                    info!(
+                        "No active SIP calls to hang up for Discord channel {} (requested by {})",
+                        channel_id, req.requested_by
+                    );
+                    continue;
+                }
+
+                info!(
+                    "Hanging up {} active SIP call(s) for Discord channel {} (requested by {})",
+                    call_ids.len(),
+                    channel_id,
+                    req.requested_by
+                );
+
+                for call_id in call_ids {
+                    let _ = hangup_sip_cmd_tx.send(SipCommand::Hangup { call_id });
+                }
             }
         });
 
@@ -962,6 +1004,7 @@ impl BridgeCoordinator {
             _ = discord_handle => { info!("Discord event handler finished"); }
             _ = health_check_handle => { info!("Health check handler finished"); }
             _ = outbound_handle => { info!("Outbound call handler finished"); }
+            _ = hangup_handle => { info!("Hangup request handler finished"); }
         }
 
         Ok(())

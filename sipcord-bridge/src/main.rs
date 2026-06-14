@@ -59,10 +59,12 @@ async fn run_static_router() -> Result<(), BridgeError> {
     // Load dialplan
     let dialplan_path = PathBuf::from(&EnvConfig::global().dialplan_path);
     let (outbound_request_tx, outbound_request_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (hangup_request_tx, hangup_request_rx) = tokio::sync::mpsc::unbounded_channel();
     let backend = Arc::new(StaticBackend::load(
         &dialplan_path,
         bot_token.clone(),
         outbound_request_rx,
+        hangup_request_rx,
     )?);
 
     // Create SIP transport (no TLS for static router)
@@ -87,6 +89,7 @@ async fn run_static_router() -> Result<(), BridgeError> {
         .map(|sip| DiscordOutboundCallConfig {
             sip,
             request_tx: outbound_request_tx,
+            hangup_tx: hangup_request_tx,
             bot_token: bot_token.clone(),
         });
     let shared_discord = SharedDiscordClient::new(&bot_token, outbound_call_config).await?;

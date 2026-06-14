@@ -73,7 +73,6 @@ RTP_PUBLIC_IP=192.168.0.100
 DISCORD_OUTBOUND_SIP_HOST=192.168.0.25
 DISCORD_OUTBOUND_SIP_PORT=5060
 DISCORD_OUTBOUND_SIP_TRANSPORT=udp
-DISCORD_OUTBOUND_EXTENSION_PREFIX=
 ```
 
 Set both IPs to the address other SIP devices use to reach the bridge. For
@@ -85,12 +84,6 @@ it.
 Set `DISCORD_OUTBOUND_SIP_HOST` to the PBX or SIP server that should receive
 Discord-originated extension calls. For a FreePBX box at `192.168.0.25`, that
 means `DISCORD_OUTBOUND_SIP_HOST=192.168.0.25`.
-
-Discord-originated calls dial the requested extension directly by default. The
-bridge also attaches common auto-answer headers (`Call-Info:
-<uri>;answer-after=0` and `Alert-Info: <http://127.0.0.1>;info=Ring Answer`)
-to Discord-originated outbound calls, and appends `intercom=true` to the SIP
-URI, so auto-answer phones can behave more like FreePBX intercom targets.
 
 Create a `docker-compose.yml`:
 
@@ -200,13 +193,14 @@ to the bridge host address, not the FreePBX address and not `0.0.0.0`.
 
 ### 4c. Discord -> extension calling
 
-If `DISCORD_OUTBOUND_SIP_HOST` is set, the bot registers a `/call` slash command
-in each guild it is connected to.
+If `DISCORD_OUTBOUND_SIP_HOST` is set, the bot registers `/call` and `/hangup`
+slash commands in each guild it is connected to.
 
 Usage:
 
 ```text
 /call extension:1101
+/hangup
 ```
 
 Behavior:
@@ -215,17 +209,17 @@ Behavior:
 - The bridge dials the requested extension through the configured PBX target.
 - It dials the requested extension directly, for example
   `sip:1101@192.168.0.25:5060;transport=udp`.
-- Discord-originated outbound calls also include auto-answer headers and append
-  `intercom=true` to the SIP URI so phones configured for that behavior can
-  answer immediately.
 - When the SIP side answers, the phone call is connected to the Discord voice
   channel where the command was run.
+- `/hangup` ends active SIP calls connected to the voice channel where the
+  command was run.
 
 Current scope:
 - `/call` is implemented for the static self-host backend.
 - It dials a configured PBX/SIP host by extension.
-- It does not yet include a Discord `/hangup` command or rich status updates
-  back into Discord after the initial slash command reply.
+- `/hangup` ends calls already connected to the current Discord voice channel.
+- Rich status updates back into Discord after the initial slash command reply
+  are not implemented yet.
 
 ### 4d. Build from source
 
@@ -263,7 +257,6 @@ Dial `1000` (or whatever you put in `dialplan.toml`) and you should hear the bot
 | `DISCORD_OUTBOUND_SIP_HOST` | *(disabled if unset)* | PBX/SIP host used by Discord `/call` |
 | `DISCORD_OUTBOUND_SIP_PORT` | `5060` | Port for Discord-originated outbound SIP calls |
 | `DISCORD_OUTBOUND_SIP_TRANSPORT` | `udp` | Transport for Discord-originated outbound SIP calls: `udp`, `tcp`, or `tls` |
-| `DISCORD_OUTBOUND_EXTENSION_PREFIX` | `""` | Optional prefix prepended before the requested extension for Discord-originated calls |
 | `CONFIG_PATH` | `./config.toml` | Path to config.toml |
 | `DIALPLAN_PATH` | `./dialplan.toml` | Path to dialplan.toml |
 | `SOUNDS_DIR` | `./wav` | Path to sound files directory |

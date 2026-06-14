@@ -117,7 +117,6 @@ pub enum SipCommand {
         tracking_id: String,
         sip_uri: String,
         caller_display_name: Option<String>,
-        auto_answer: bool,
         /// Total number of fork legs for this tracking_id (for multi-contact forking)
         fork_total: usize,
     },
@@ -408,14 +407,13 @@ fn process_sip_command(cmd: SipCommand, calls: &Arc<DashMap<CallId, CallState>>)
             tracking_id,
             sip_uri,
             caller_display_name,
-            auto_answer,
             fork_total,
         } => {
             info!(
-                "Making outbound call: tracking_id={}, uri={}, caller={:?}, auto_answer={}, fork={}/{}",
-                tracking_id, sip_uri, caller_display_name, auto_answer, fork_total, fork_total
+                "Making outbound call: tracking_id={}, uri={}, caller={:?}, fork={}/{}",
+                tracking_id, sip_uri, caller_display_name, fork_total, fork_total
             );
-            match make_outbound_call(&sip_uri, caller_display_name.as_deref(), auto_answer) {
+            match make_outbound_call(&sip_uri, caller_display_name.as_deref()) {
                 Ok(call_id) => {
                     // Store tracking_id -> call_id mapping
                     let outbound_calls = OUTBOUND_CALL_TRACKING.get_or_init(DashMap::new);
@@ -526,24 +524,10 @@ pub fn remove_outbound_tracking(call_id: CallId) -> Option<String> {
 fn make_outbound_call(
     sip_uri: &str,
     caller_display_name: Option<&str>,
-    auto_answer: bool,
 ) -> Result<CallId, SipCallError> {
     unsafe {
-        use self::ffi::pj_str::make_string_hdr;
-        let outbound_uri = if auto_answer {
-            if sip_uri.contains("intercom=true") {
-                sip_uri.to_string()
-            } else if let Some((base, params)) = sip_uri.split_once(';') {
-                format!("{base};intercom=true;{params}")
-            } else {
-                format!("{sip_uri};intercom=true")
-            }
-        } else {
-            sip_uri.to_string()
-        };
-
         let uri =
-            std::ffi::CString::new(outbound_uri).map_err(|source| SipCallError::InvalidString {
+            std::ffi::CString::new(sip_uri).map_err(|source| SipCallError::InvalidString {
                 field: "sip_uri",
                 source,
             })?;
@@ -563,28 +547,6 @@ fn make_outbound_call(
         let mut msg_data = std::mem::MaybeUninit::<::pjsua::pjsua_msg_data>::uninit();
         ::pjsua::pjsua_msg_data_init(msg_data.as_mut_ptr());
         let msg_data_ptr = msg_data.assume_init_mut();
-
-        if auto_answer {
-            let pool = ::pjsua::pjsua_pool_create(c"outbound_call".as_ptr(), 512, 512);
-            if pool.is_null() {
-                return Err(SipCallError::MakeCall(-1));
-            }
-
-            let call_info = make_string_hdr(pool, c"Call-Info", "<uri>;answer-after=0")
-                .map_err(|_| SipCallError::MakeCall(-1))?;
-            ::pjsua::pj_list_insert_before(
-                &mut msg_data_ptr.hdr_list as *mut _ as *mut ::pjsua::pj_list_type,
-                call_info as *mut ::pjsua::pj_list_type,
-            );
-
-            let alert_info =
-                make_string_hdr(pool, c"Alert-Info", "<http://127.0.0.1>;info=Ring Answer")
-                .map_err(|_| SipCallError::MakeCall(-1))?;
-            ::pjsua::pj_list_insert_before(
-                &mut msg_data_ptr.hdr_list as *mut _ as *mut ::pjsua::pj_list_type,
-                alert_info as *mut ::pjsua::pj_list_type,
-            );
-        }
 
         // Build the From URI with display name: "name" <sip:sipcord@host>
         // The local_uri field overrides the From header in the outgoing INVITE
