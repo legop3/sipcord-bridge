@@ -27,23 +27,12 @@ pub struct HangupCallRequest {
     pub created_at: std::time::Instant,
 }
 
-/// A single static IVR menu option.
-#[derive(Debug, Clone)]
-pub struct MenuOptionRoute {
-    pub guild_id: Snowflake,
-    pub channel_id: Snowflake,
-    pub label: Option<String>,
-}
-
-/// Static IVR menu route.
+/// Dynamic IVR menu route.
 #[derive(Debug, Clone)]
 pub struct MenuRoute {
     pub id: String,
-    pub prompt: Option<String>,
-    pub invalid_prompt: Option<String>,
     pub timeout_seconds: u64,
     pub max_attempts: u8,
-    pub options: std::collections::HashMap<char, MenuOptionRoute>,
 }
 
 /// Result of routing an incoming SIP call

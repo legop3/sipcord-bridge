@@ -1,7 +1,8 @@
 //! Static dialplan router — routes calls based on a TOML file.
 //!
 //! This is the open-source-friendly backend that doesn't require the SIPcord API.
-//! It reads a `dialplan.toml` file mapping extensions to Discord voice channels.
+//! It reads a `dialplan.toml` file mapping extensions to Discord voice channels
+//! and optional dynamic menu extensions that browse the bot's Discord guilds.
 //!
 //! Required env var: `DISCORD_BOT_TOKEN`
 //!
@@ -10,6 +11,9 @@
 //! [extensions]
 //! 1000 = { guild = "123456789012345678", channel = "987654321012345678" }
 //! 2000 = { guild = "123456789012345678", channel = "111222333444555666" }
+//!
+//! [menus.main]
+//! extension = "8000"
 //! ```
 
 use std::collections::HashMap;
@@ -23,8 +27,8 @@ use tracing::info;
 
 use crate::config::ConfigError;
 use crate::routing::{
-    Backend, CallError, CallStartedInfo, HangupCallRequest, MenuOptionRoute, MenuRoute,
-    OutboundCallRequest, RouteDecision,
+    Backend, CallError, CallStartedInfo, HangupCallRequest, MenuRoute, OutboundCallRequest,
+    RouteDecision,
 };
 use crate::services::snowflake::Snowflake;
 use crate::transport::sip::DigestAuthParams;
@@ -36,22 +40,12 @@ struct ExtensionTarget {
 }
 
 #[derive(Deserialize, Clone)]
-struct MenuOptionTarget {
-    guild: Snowflake,
-    channel: Snowflake,
-    label: Option<String>,
-}
-
-#[derive(Deserialize, Clone)]
 struct MenuConfig {
     extension: String,
-    prompt: Option<String>,
-    invalid_prompt: Option<String>,
     #[serde(default = "default_menu_timeout_seconds")]
     timeout_seconds: u64,
     #[serde(default = "default_menu_max_attempts")]
     max_attempts: u8,
-    options: HashMap<String, MenuOptionTarget>,
 }
 
 #[derive(Deserialize)]
@@ -112,14 +106,9 @@ impl StaticBackend {
             );
         }
         if !dialplan.menus.is_empty() {
-            info!("Loaded {} static menu(s)", dialplan.menus.len());
+            info!("Loaded {} dynamic menu(s)", dialplan.menus.len());
             for (id, menu) in &dialplan.menus {
-                info!(
-                    "  menu {} on ext {} ({} options)",
-                    id,
-                    menu.extension,
-                    menu.options.len()
-                );
+                info!("  dynamic menu {} on ext {}", id, menu.extension);
             }
         }
 
@@ -145,30 +134,11 @@ impl Backend for StaticBackend {
             .iter()
             .find(|(_, menu)| menu.extension == extension)
         {
-            let options = menu
-                .options
-                .iter()
-                .filter_map(|(digit, target)| {
-                    let digit = digit.chars().next()?;
-                    Some((
-                        digit,
-                        MenuOptionRoute {
-                            guild_id: target.guild,
-                            channel_id: target.channel,
-                            label: target.label.clone(),
-                        },
-                    ))
-                })
-                .collect();
-
             return RouteDecision::Menu {
                 menu: MenuRoute {
                     id: id.clone(),
-                    prompt: menu.prompt.clone(),
-                    invalid_prompt: menu.invalid_prompt.clone(),
                     timeout_seconds: menu.timeout_seconds,
                     max_attempts: menu.max_attempts,
-                    options,
                 },
             };
         }
@@ -305,14 +275,8 @@ mod tests {
         let toml_content = r#"
 [menus.main]
 extension = "8000"
-prompt = "main_menu"
-invalid_prompt = "invalid"
 timeout_seconds = 7
 max_attempts = 2
-
-[menus.main.options]
-1 = { guild = 111, channel = 222, label = "Lobby" }
-2 = { guild = 333, channel = 444, label = "Workshop" }
 "#;
         let dir = std::env::temp_dir().join("sipcord_test_dialplan");
         std::fs::create_dir_all(&dir).ok();
@@ -333,15 +297,8 @@ max_attempts = 2
             match decision {
                 RouteDecision::Menu { menu } => {
                     assert_eq!(menu.id, "main");
-                    assert_eq!(menu.prompt.as_deref(), Some("main_menu"));
-                    assert_eq!(menu.invalid_prompt.as_deref(), Some("invalid"));
                     assert_eq!(menu.timeout_seconds, 7);
                     assert_eq!(menu.max_attempts, 2);
-                    assert_eq!(menu.options.get(&'1').unwrap().channel_id, Snowflake::new(222));
-                    assert_eq!(
-                        menu.options.get(&'2').unwrap().label.as_deref(),
-                        Some("Workshop")
-                    );
                 }
                 _ => panic!("Expected Menu"),
             }

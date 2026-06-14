@@ -10,14 +10,8 @@ This means you have to build the call routing backend yourself. I am including a
 
 [menus.main]
 extension = "8000"
-prompt = "main_menu"
-invalid_prompt = "invalid"
 timeout_seconds = 10
 max_attempts = 3
-
-[menus.main.options]
-1 = { guild = "123456789012345620", channel = "987654321012345620", label = "Lobby" }
-2 = { guild = "123456789012345620", channel = "111222333444555620", label = "Workshop" }
 ```
 but if you want more fancy routing you have to build it. You can easily use sipcord-bridge as a library and provide your own routers by implementing the `Backend` trait.
 
@@ -67,25 +61,20 @@ Create a `dialplan.toml` mapping extensions to Discord channels:
 
 Each extension is what you'll dial from your SIP phone. Pick any numbers you like.
 
-You can also add a simple phone menu. A caller dials the menu extension, hears
-the prompt, presses a digit, and Sipcord joins the selected Discord voice
-channel:
+You can also add a dynamic phone menu. A caller dials the menu extension,
+Sipcord reads the available Discord servers, the caller picks one with DTMF,
+then Sipcord reads that server's voice channels and joins the selected channel:
 
 ```toml
 [menus.main]
 extension = "8000"
-prompt = "main_menu"
-invalid_prompt = "invalid"
 timeout_seconds = 10
 max_attempts = 3
-
-[menus.main.options]
-1 = { guild = "123456789012345678", channel = "987654321012345678", label = "Lobby" }
-2 = { guild = "123456789012345678", channel = "111222333444555666", label = "Workshop" }
 ```
 
-`prompt` and `invalid_prompt` are optional sound names from `config.toml`.
-They must be preloaded 16kHz mono audio files. Press `#` to repeat the menu.
+The menu uses `espeak-ng` for local text-to-speech. Press `#` to repeat the
+current menu page, `9` for the next page when available, and `*` for the
+previous page when available.
 
 ### 4a. Run with Docker (recommended)
 

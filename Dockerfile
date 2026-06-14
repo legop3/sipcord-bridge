@@ -115,6 +115,8 @@ RUN apt-get update && apt-get install -y \
     libopus0 \
     libtiff6 \
     libjpeg62-turbo \
+    espeak-ng \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

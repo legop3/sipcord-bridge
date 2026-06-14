@@ -17,8 +17,7 @@
 use crate::fax::session::FaxSession;
 use crate::fax::spandsp::FaxT38Receiver;
 use crate::routing::{
-    Backend, CallError, CallStartedInfo, MenuOptionRoute, MenuRoute, OutboundCallRequest,
-    RouteDecision,
+    Backend, CallError, CallStartedInfo, MenuRoute, OutboundCallRequest, RouteDecision,
 };
 use crate::services::snowflake::Snowflake;
 use crate::services::sound::{SoundManager, create_sound_manager};
@@ -39,6 +38,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -1462,6 +1462,32 @@ struct MenuCallContext {
     health_check_notify: Arc<Notify>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct DiscordRestGuild {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct DiscordRestChannel {
+    id: String,
+    name: String,
+    #[serde(rename = "type")]
+    kind: u8,
+}
+
+#[derive(Debug, Clone)]
+struct DynamicGuildOption {
+    guild_id: Snowflake,
+    name: String,
+}
+
+#[derive(Debug, Clone)]
+struct DynamicChannelOption {
+    channel_id: Snowflake,
+    name: String,
+}
+
 async fn handle_menu_call(
     ctx: MenuCallContext,
     call_id: CallId,
@@ -1480,103 +1506,405 @@ async fn handle_menu_call(
     ctx.dtmf_waiters.insert(call_id, dtmf_tx);
 
     let max_attempts = menu.max_attempts.max(1);
-    let mut attempts = 0u8;
-    let selected = loop {
-        if !ctx.sip_calls.contains_key(&call_id) {
-            ctx.dtmf_waiters.remove(&call_id);
-            return;
-        }
-
-        if let Some(prompt) = menu.prompt.as_deref() {
-            play_named_prompt(call_id, prompt, &ctx.sound_manager, &ctx.sip_cmd_tx).await;
-        }
-
-        let digit = match tokio::time::timeout(
-            Duration::from_secs(menu.timeout_seconds.max(1)),
-            dtmf_rx.recv(),
-        )
-        .await
-        {
-            Ok(Some(digit)) => digit,
-            Ok(None) => {
-                warn!("Menu {} DTMF channel closed for call {}", menu.id, call_id);
-                ctx.dtmf_waiters.remove(&call_id);
-                let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
-                return;
-            }
-            Err(_) => {
-                attempts = attempts.saturating_add(1);
-                warn!(
-                    "Menu {} timed out waiting for DTMF on call {} ({}/{})",
-                    menu.id, call_id, attempts, max_attempts
-                );
-                if attempts >= max_attempts {
-                    ctx.dtmf_waiters.remove(&call_id);
-                    let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
-                    return;
-                }
-                if let Some(invalid_prompt) = menu.invalid_prompt.as_deref() {
-                    play_named_prompt(call_id, invalid_prompt, &ctx.sound_manager, &ctx.sip_cmd_tx)
-                        .await;
-                }
-                continue;
-            }
-        };
-
-        if digit == '#' {
-            info!("Repeating menu {} for call {}", menu.id, call_id);
-            continue;
-        }
-
-        if let Some(option) = menu.options.get(&digit) {
-            break option.clone();
-        }
-
-        attempts = attempts.saturating_add(1);
-        warn!(
-            "Invalid menu digit {} for menu {} on call {} ({}/{})",
-            digit, menu.id, call_id, attempts, max_attempts
-        );
-        if attempts >= max_attempts {
+    let guilds = match fetch_discord_guilds(ctx.backend.bot_token()).await {
+        Ok(guilds) if !guilds.is_empty() => guilds,
+        Ok(_) => {
+            warn!("Dynamic menu {} has no Discord guilds to offer", menu.id);
+            let _ =
+                play_tts_prompt(call_id, "No Discord servers are available.", &ctx.sip_cmd_tx)
+                    .await;
             ctx.dtmf_waiters.remove(&call_id);
             let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
             return;
         }
-        if let Some(invalid_prompt) = menu.invalid_prompt.as_deref() {
-            play_named_prompt(call_id, invalid_prompt, &ctx.sound_manager, &ctx.sip_cmd_tx).await;
+        Err(e) => {
+            error!("Failed to load Discord guilds for menu {}: {}", menu.id, e);
+            let _ =
+                play_tts_prompt(call_id, "I could not load Discord servers.", &ctx.sip_cmd_tx)
+                    .await;
+            ctx.dtmf_waiters.remove(&call_id);
+            let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
+            return;
         }
     };
 
+    let guild =
+        match select_guild_from_menu(call_id, &menu, &guilds, max_attempts, &mut dtmf_rx, &ctx)
+            .await
+        {
+            Some(guild) => guild,
+            None => return,
+        };
+
+    let channels = match fetch_discord_voice_channels(ctx.backend.bot_token(), guild.guild_id).await
+    {
+        Ok(channels) if !channels.is_empty() => channels,
+        Ok(_) => {
+            let text = format!("{} has no voice channels available.", guild.name);
+            let _ = play_tts_prompt(call_id, &text, &ctx.sip_cmd_tx).await;
+            ctx.dtmf_waiters.remove(&call_id);
+            let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
+            return;
+        }
+        Err(e) => {
+            error!(
+                "Failed to load Discord channels for guild {}: {}",
+                guild.guild_id, e
+            );
+            let _ =
+                play_tts_prompt(call_id, "I could not load voice channels.", &ctx.sip_cmd_tx)
+                    .await;
+            ctx.dtmf_waiters.remove(&call_id);
+            let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
+            return;
+        }
+    };
+
+    let selected = match select_channel_from_menu(
+        call_id,
+        &menu,
+        &guild,
+        &channels,
+        max_attempts,
+        &mut dtmf_rx,
+        &ctx,
+    )
+    .await
+    {
+        Some(channel) => channel,
+        None => return,
+    };
+
     ctx.dtmf_waiters.remove(&call_id);
-    connect_menu_selection(ctx, call_id, extension, selected).await;
+    connect_menu_selection(ctx, call_id, extension, guild, selected).await;
 }
 
-async fn play_named_prompt(
+async fn select_guild_from_menu(
     call_id: CallId,
-    sound_name: &str,
-    sound_manager: &SoundManager,
-    sip_cmd_tx: &Sender<SipCommand>,
-) {
-    if let Some(sound) = sound_manager.get_preloaded(sound_name) {
-        info!("Playing menu prompt '{}' for call {}", sound_name, call_id);
-        let _ = sip_cmd_tx.send(SipCommand::PlayDirectToCall {
-            call_id,
-            samples: (*sound.samples).clone(),
-        });
-        tokio::time::sleep(Duration::from_millis(sound.duration_ms + 100)).await;
-    } else {
-        warn!("Menu prompt sound '{}' is not preloaded or does not exist", sound_name);
+    menu: &MenuRoute,
+    guilds: &[DynamicGuildOption],
+    max_attempts: u8,
+    dtmf_rx: &mut mpsc::UnboundedReceiver<char>,
+    ctx: &MenuCallContext,
+) -> Option<DynamicGuildOption> {
+    let mut page = 0usize;
+    let mut attempts = 0u8;
+    loop {
+        let page_items = page_slice(guilds, page);
+        let prompt = build_option_prompt(
+            "Select a Discord server.",
+            page_items,
+            |guild| guild.name.as_str(),
+            page,
+            guilds.len(),
+        );
+        if let Err(e) = play_tts_prompt(call_id, &prompt, &ctx.sip_cmd_tx).await {
+            error!("Failed to play guild menu TTS for call {}: {}", call_id, e);
+            ctx.dtmf_waiters.remove(&call_id);
+            let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
+            return None;
+        }
+
+        let digit = wait_for_menu_digit(call_id, menu, dtmf_rx, ctx).await?;
+        match digit {
+            '#' => continue,
+            '9' if has_next_page(guilds.len(), page) => {
+                page += 1;
+                continue;
+            }
+            '*' if page > 0 => {
+                page -= 1;
+                continue;
+            }
+            '1'..='8' => {
+                let idx = page * 8 + digit.to_digit(10).unwrap_or(0) as usize - 1;
+                if let Some(guild) = guilds.get(idx) {
+                    return Some(guild.clone());
+                }
+            }
+            _ => {}
+        }
+
+        attempts = attempts.saturating_add(1);
+        if attempts >= max_attempts {
+            let _ =
+                play_tts_prompt(call_id, "Too many invalid selections. Goodbye.", &ctx.sip_cmd_tx)
+                    .await;
+            ctx.dtmf_waiters.remove(&call_id);
+            let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
+            return None;
+        }
+        let _ = play_tts_prompt(call_id, "Invalid selection.", &ctx.sip_cmd_tx).await;
     }
+}
+
+async fn select_channel_from_menu(
+    call_id: CallId,
+    menu: &MenuRoute,
+    guild: &DynamicGuildOption,
+    channels: &[DynamicChannelOption],
+    max_attempts: u8,
+    dtmf_rx: &mut mpsc::UnboundedReceiver<char>,
+    ctx: &MenuCallContext,
+) -> Option<DynamicChannelOption> {
+    let mut page = 0usize;
+    let mut attempts = 0u8;
+    loop {
+        let page_items = page_slice(channels, page);
+        let intro = format!("Select a voice channel in {}.", guild.name);
+        let prompt = build_option_prompt(
+            &intro,
+            page_items,
+            |channel| channel.name.as_str(),
+            page,
+            channels.len(),
+        );
+        if let Err(e) = play_tts_prompt(call_id, &prompt, &ctx.sip_cmd_tx).await {
+            error!("Failed to play channel menu TTS for call {}: {}", call_id, e);
+            ctx.dtmf_waiters.remove(&call_id);
+            let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
+            return None;
+        }
+
+        let digit = wait_for_menu_digit(call_id, menu, dtmf_rx, ctx).await?;
+        match digit {
+            '#' => continue,
+            '*' if page > 0 => {
+                page -= 1;
+                continue;
+            }
+            '9' if has_next_page(channels.len(), page) => {
+                page += 1;
+                continue;
+            }
+            '1'..='8' => {
+                let idx = page * 8 + digit.to_digit(10).unwrap_or(0) as usize - 1;
+                if let Some(channel) = channels.get(idx) {
+                    return Some(channel.clone());
+                }
+            }
+            _ => {}
+        }
+
+        attempts = attempts.saturating_add(1);
+        if attempts >= max_attempts {
+            let _ =
+                play_tts_prompt(call_id, "Too many invalid selections. Goodbye.", &ctx.sip_cmd_tx)
+                    .await;
+            ctx.dtmf_waiters.remove(&call_id);
+            let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
+            return None;
+        }
+        let _ = play_tts_prompt(call_id, "Invalid selection.", &ctx.sip_cmd_tx).await;
+    }
+}
+
+fn page_slice<T>(items: &[T], page: usize) -> &[T] {
+    let start = page.saturating_mul(8);
+    let end = (start + 8).min(items.len());
+    if start >= items.len() {
+        &[]
+    } else {
+        &items[start..end]
+    }
+}
+
+fn has_next_page(total: usize, page: usize) -> bool {
+    (page + 1) * 8 < total
+}
+
+fn build_option_prompt<T>(
+    intro: &str,
+    items: &[T],
+    label: impl Fn(&T) -> &str,
+    page: usize,
+    total: usize,
+) -> String {
+    let mut prompt = String::from(intro);
+    for (idx, item) in items.iter().enumerate() {
+        prompt.push_str(&format!(" Press {} for {}.", idx + 1, label(item)));
+    }
+    if has_next_page(total, page) {
+        prompt.push_str(" Press 9 for more.");
+    }
+    if page > 0 {
+        prompt.push_str(" Press star for previous.");
+    }
+    prompt.push_str(" Press pound to repeat.");
+    prompt
+}
+
+async fn wait_for_menu_digit(
+    call_id: CallId,
+    menu: &MenuRoute,
+    dtmf_rx: &mut mpsc::UnboundedReceiver<char>,
+    ctx: &MenuCallContext,
+) -> Option<char> {
+    if !ctx.sip_calls.contains_key(&call_id) {
+        ctx.dtmf_waiters.remove(&call_id);
+        return None;
+    }
+
+    match tokio::time::timeout(
+        Duration::from_secs(menu.timeout_seconds.max(1)),
+        dtmf_rx.recv(),
+    )
+    .await
+    {
+        Ok(Some(digit)) => Some(digit),
+        Ok(None) => {
+            warn!("Menu {} DTMF channel closed for call {}", menu.id, call_id);
+            ctx.dtmf_waiters.remove(&call_id);
+            let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
+            None
+        }
+        Err(_) => {
+            warn!("Menu {} timed out waiting for DTMF on call {}", menu.id, call_id);
+            let _ = play_tts_prompt(call_id, "No selection received.", &ctx.sip_cmd_tx).await;
+            Some('\0')
+        }
+    }
+}
+
+async fn fetch_discord_guilds(
+    bot_token: &str,
+) -> Result<Vec<DynamicGuildOption>, Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::Client::new();
+    let guilds: Vec<DiscordRestGuild> = client
+        .get("https://discord.com/api/v10/users/@me/guilds?limit=200")
+        .header("Authorization", format!("Bot {}", bot_token))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let mut guilds: Vec<DynamicGuildOption> = guilds
+        .into_iter()
+        .filter_map(|guild| {
+            let guild_id = guild.id.parse::<Snowflake>().ok()?;
+            Some(DynamicGuildOption {
+                guild_id,
+                name: guild.name,
+            })
+        })
+        .collect();
+    guilds.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    Ok(guilds)
+}
+
+async fn fetch_discord_voice_channels(
+    bot_token: &str,
+    guild_id: Snowflake,
+) -> Result<Vec<DynamicChannelOption>, Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::Client::new();
+    let url = format!("https://discord.com/api/v10/guilds/{}/channels", guild_id);
+    let channels: Vec<DiscordRestChannel> = client
+        .get(url)
+        .header("Authorization", format!("Bot {}", bot_token))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let mut channels: Vec<DynamicChannelOption> = channels
+        .into_iter()
+        .filter(|channel| channel.kind == 2)
+        .filter_map(|channel| {
+            let channel_id = channel.id.parse::<Snowflake>().ok()?;
+            Some(DynamicChannelOption {
+                channel_id,
+                name: channel.name,
+            })
+        })
+        .collect();
+    channels.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    Ok(channels)
+}
+
+async fn play_tts_prompt(
+    call_id: CallId,
+    text: &str,
+    sip_cmd_tx: &Sender<SipCommand>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let samples = synthesize_tts_samples(call_id, text).await?;
+    let duration_ms = (samples.len() as u64 * 1000) / CONF_SAMPLE_RATE as u64;
+    let _ = sip_cmd_tx.send(SipCommand::PlayDirectToCall { call_id, samples });
+    tokio::time::sleep(Duration::from_millis(duration_ms + 100)).await;
+    Ok(())
+}
+
+async fn synthesize_tts_samples(
+    call_id: CallId,
+    text: &str,
+) -> Result<Vec<i16>, Box<dyn std::error::Error + Send + Sync>> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let raw_path = std::env::temp_dir().join(format!("sipcord-tts-{}-{}-raw.wav", call_id, stamp));
+    let out_path = std::env::temp_dir().join(format!("sipcord-tts-{}-{}.wav", call_id, stamp));
+
+    let espeak_status = Command::new("espeak-ng")
+        .arg("-w")
+        .arg(&raw_path)
+        .arg(text)
+        .status()
+        .await?;
+    if !espeak_status.success() {
+        let _ = tokio::fs::remove_file(&raw_path).await;
+        return Err(format!("espeak-ng exited with status {}", espeak_status).into());
+    }
+
+    let ffmpeg_status = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(&raw_path)
+        .arg("-ac")
+        .arg("1")
+        .arg("-ar")
+        .arg(CONF_SAMPLE_RATE.to_string())
+        .arg("-sample_fmt")
+        .arg("s16")
+        .arg(&out_path)
+        .status()
+        .await?;
+    if !ffmpeg_status.success() {
+        let _ = tokio::fs::remove_file(&raw_path).await;
+        return Err(format!("ffmpeg exited with status {}", ffmpeg_status).into());
+    }
+
+    let _ = tokio::fs::remove_file(&raw_path).await;
+    let data = match tokio::fs::read(&out_path).await {
+        Ok(data) => data,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&out_path).await;
+            return Err(e.into());
+        }
+    };
+    let _ = tokio::fs::remove_file(&out_path).await;
+    let (samples, rate) = crate::audio::wav::parse_wav(&data)?;
+    if rate != CONF_SAMPLE_RATE {
+        return Err(format!(
+            "TTS WAV has sample rate {}, expected {}",
+            rate, CONF_SAMPLE_RATE
+        )
+        .into());
+    }
+    Ok(samples)
 }
 
 async fn connect_menu_selection(
     ctx: MenuCallContext,
     call_id: CallId,
     extension: String,
-    selected: MenuOptionRoute,
+    guild: DynamicGuildOption,
+    selected: DynamicChannelOption,
 ) {
     let channel_id = selected.channel_id;
-    let guild_id = selected.guild_id;
+    let guild_id = guild.guild_id;
     let user_id = "menu".to_string();
     let bot_token = ctx.backend.bot_token().to_string();
 
@@ -1584,7 +1912,7 @@ async fn connect_menu_selection(
         "Menu call {} selected channel {} ({})",
         call_id,
         channel_id,
-        selected.label.as_deref().unwrap_or("unlabeled")
+        selected.name
     );
 
     let mut conflicting_channel: Option<Snowflake> = None;
