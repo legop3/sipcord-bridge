@@ -702,7 +702,7 @@ impl EventHandler for SharedClientEventHandler {
             }
             FullEvent::GuildCreate { guild, .. } => {
                 let guild_id = Snowflake::new(guild.id.get());
-                for voice_state in guild.voice_states.values() {
+                for (_, voice_state) in guild.voice_states.iter() {
                     self.voice_state_tracker.update(
                         Snowflake::new(voice_state.user_id.get()),
                         Some(guild_id),
