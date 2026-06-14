@@ -31,6 +31,27 @@ pub fn extract_sip_username(uri: &str) -> String {
     }
 }
 
+/// Extract display name from SIP URI if present (e.g., "Alice Smith" <sip:alice@example.com> -> "Alice Smith")
+pub fn extract_display_name(uri: &str) -> String {
+    let uri = uri.trim();
+
+    // Check if there's a quoted display name before the angle bracket
+    if let Some(angle_pos) = uri.find('<') {
+        let display_part = uri[..angle_pos].trim();
+
+        // Remove surrounding quotes if present
+        let display_name = display_part
+            .trim_start_matches('"')
+            .trim_end_matches('"')
+            .trim();
+
+        return display_name.to_string();
+    }
+
+    // No angle brackets found - no display name
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +84,44 @@ mod tests {
     #[test]
     fn test_extract_sip_username_empty() {
         assert_eq!(extract_sip_username(""), "");
+    }
+
+    #[test]
+    fn test_extract_display_name_with_quotes_and_uri() {
+        assert_eq!(
+            extract_display_name("\"Alice Smith\" <sip:alice@example.com>"),
+            "Alice Smith"
+        );
+    }
+
+    #[test]
+    fn test_extract_display_name_without_quotes() {
+        assert_eq!(
+            extract_display_name("Bob Jones <sip:bob@example.com>"),
+            "Bob Jones"
+        );
+    }
+
+    #[test]
+    fn test_extract_display_name_no_display_name() {
+        assert_eq!(extract_display_name("<sip:charlie@example.com>"), "");
+    }
+
+    #[test]
+    fn test_extract_display_name_uri_only() {
+        assert_eq!(extract_display_name("sip:dave@example.com"), "");
+    }
+
+    #[test]
+    fn test_extract_display_name_with_extra_spaces() {
+        assert_eq!(
+            extract_display_name("  \"Eve Adams\"  <sip:eve@example.com>  "),
+            "Eve Adams"
+        );
+    }
+
+    #[test]
+    fn test_extract_display_name_empty() {
+        assert_eq!(extract_display_name(""), "");
     }
 }
