@@ -7,7 +7,7 @@ use crate::transport::sip::error::SipAudioError;
 use super::types::*;
 use parking_lot::Mutex;
 use pjsua::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Custom get_frame callback for direct player ports
 /// Returns samples from the player's buffer, advancing position each call
@@ -73,6 +73,20 @@ pub unsafe extern "C" fn direct_player_on_destroy(this_port: *mut pjmedia_port) 
         if let Some(state) = DIRECT_PLAYER_STATE.get() {
             state.lock().remove(&port_key);
         }
+        let call_id = DIRECT_PLAYER_CALLS
+            .get()
+            .and_then(|calls| calls.lock().remove(&port_key));
+        if let Some(call_id) = call_id
+            && let Some(ports) = DIRECT_PLAYER_PORTS.get()
+        {
+            let mut ports = ports.lock();
+            if let Some(call_ports) = ports.get_mut(&call_id) {
+                call_ports.remove(&port_key);
+                if call_ports.is_empty() {
+                    ports.remove(&call_id);
+                }
+            }
+        }
         tracing::debug!("Direct player port destroyed: {:p}", this_port);
     }
     pj_constants__PJ_SUCCESS as pj_status_t
@@ -99,6 +113,43 @@ pub fn play_audio_to_call_direct(call_id: CallId, samples: &[i16]) -> Result<(),
         samples: samples.to_vec(),
     });
     Ok(())
+}
+
+/// Stop direct one-shot audio currently playing to a call.
+pub fn stop_direct_audio_to_call(call_id: CallId) {
+    use super::types::{PendingPjsuaOp, queue_pjsua_op};
+
+    queue_pjsua_op(PendingPjsuaOp::StopDirect { call_id });
+}
+
+/// Internal implementation of direct audio stop, run on the audio thread.
+pub fn stop_direct_audio_to_call_internal(call_id: CallId) {
+    let port_keys = DIRECT_PLAYER_PORTS
+        .get()
+        .and_then(|ports| ports.lock().remove(&call_id));
+
+    let Some(port_keys) = port_keys else {
+        return;
+    };
+
+    if let Some(state) = DIRECT_PLAYER_STATE.get() {
+        let mut state = state.lock();
+        for port_key in &port_keys {
+            state.remove(port_key);
+        }
+    }
+    if let Some(calls) = DIRECT_PLAYER_CALLS.get() {
+        let mut calls = calls.lock();
+        for port_key in &port_keys {
+            calls.remove(port_key);
+        }
+    }
+
+    tracing::debug!(
+        "Stopped {} direct player(s) for call {}",
+        port_keys.len(),
+        call_id
+    );
 }
 
 /// Internal implementation of play_audio_to_call_direct
@@ -141,6 +192,14 @@ pub fn play_audio_to_call_direct_internal(
                 // Now store samples with the actual port key
                 let state = DIRECT_PLAYER_STATE.get_or_init(|| Mutex::new(HashMap::new()));
                 state.lock().insert(guard.port_key, (samples.to_vec(), 0));
+                let ports = DIRECT_PLAYER_PORTS.get_or_init(|| Mutex::new(HashMap::new()));
+                ports
+                    .lock()
+                    .entry(call_id)
+                    .or_insert_with(HashSet::new)
+                    .insert(guard.port_key);
+                let calls = DIRECT_PLAYER_CALLS.get_or_init(|| Mutex::new(HashMap::new()));
+                calls.lock().insert(guard.port_key, call_id);
 
                 tracing::debug!(
                     "Playing {} samples directly to call {} (player_slot={}, call_port={})",

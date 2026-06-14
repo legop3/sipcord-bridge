@@ -1598,14 +1598,8 @@ async fn select_guild_from_menu(
             page,
             guilds.len(),
         );
-        if let Err(e) = play_tts_prompt(call_id, &prompt, &ctx.sip_cmd_tx).await {
-            error!("Failed to play guild menu TTS for call {}: {}", call_id, e);
-            ctx.dtmf_waiters.remove(&call_id);
-            let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
-            return None;
-        }
-
-        let digit = wait_for_menu_digit(call_id, menu, dtmf_rx, ctx).await?;
+        let digit =
+            play_tts_prompt_and_wait_for_digit(call_id, menu, &prompt, dtmf_rx, ctx).await?;
         match digit {
             '#' => continue,
             '9' if has_next_page(guilds.len(), page) => {
@@ -1659,14 +1653,8 @@ async fn select_channel_from_menu(
             page,
             channels.len(),
         );
-        if let Err(e) = play_tts_prompt(call_id, &prompt, &ctx.sip_cmd_tx).await {
-            error!("Failed to play channel menu TTS for call {}: {}", call_id, e);
-            ctx.dtmf_waiters.remove(&call_id);
-            let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
-            return None;
-        }
-
-        let digit = wait_for_menu_digit(call_id, menu, dtmf_rx, ctx).await?;
+        let digit =
+            play_tts_prompt_and_wait_for_digit(call_id, menu, &prompt, dtmf_rx, ctx).await?;
         match digit {
             '#' => continue,
             '*' if page > 0 => {
@@ -1782,9 +1770,10 @@ fn is_tts_skipped_symbol(ch: char) -> bool {
     )
 }
 
-async fn wait_for_menu_digit(
+async fn play_tts_prompt_and_wait_for_digit(
     call_id: CallId,
     menu: &MenuRoute,
+    text: &str,
     dtmf_rx: &mut mpsc::UnboundedReceiver<char>,
     ctx: &MenuCallContext,
 ) -> Option<char> {
@@ -1793,13 +1782,28 @@ async fn wait_for_menu_digit(
         return None;
     }
 
-    match tokio::time::timeout(
-        Duration::from_secs(menu.timeout_seconds.max(1)),
-        dtmf_rx.recv(),
-    )
-    .await
-    {
-        Ok(Some(digit)) => Some(digit),
+    let samples = match synthesize_tts_samples(call_id, text).await {
+        Ok(samples) => samples,
+        Err(e) => {
+            error!("Failed to synthesize menu TTS for call {}: {}", call_id, e);
+            ctx.dtmf_waiters.remove(&call_id);
+            let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
+            return None;
+        }
+    };
+
+    let duration_ms = (samples.len() as u64 * 1000) / CONF_SAMPLE_RATE as u64;
+    let _ = ctx
+        .sip_cmd_tx
+        .send(SipCommand::PlayDirectToCall { call_id, samples });
+
+    let wait_duration =
+        Duration::from_millis(duration_ms + 100) + Duration::from_secs(menu.timeout_seconds.max(1));
+    match tokio::time::timeout(wait_duration, dtmf_rx.recv()).await {
+        Ok(Some(digit)) => {
+            let _ = ctx.sip_cmd_tx.send(SipCommand::StopDirectToCall { call_id });
+            Some(digit)
+        }
         Ok(None) => {
             warn!("Menu {} DTMF channel closed for call {}", menu.id, call_id);
             ctx.dtmf_waiters.remove(&call_id);

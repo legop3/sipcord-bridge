@@ -322,6 +322,9 @@ fn describe_op(op: &PendingPjsuaOp) -> String {
         PendingPjsuaOp::PlayDirect { call_id, samples } => {
             format!("PlayDirect {{ call_id: {}, samples: {} }}", call_id, samples.len())
         }
+        PendingPjsuaOp::StopDirect { call_id } => {
+            format!("StopDirect {{ call_id: {} }}", call_id)
+        }
         PendingPjsuaOp::StartLoop { call_id, samples } => {
             format!("StartLoop {{ call_id: {}, samples: {} }}", call_id, samples.len())
         }
@@ -355,6 +358,7 @@ fn process_pending_pjsua_ops() {
         // Validate that the call still exists before processing the op
         let call_id = match &op {
             PendingPjsuaOp::PlayDirect { call_id, .. } => Some(*call_id),
+            PendingPjsuaOp::StopDirect { call_id } => Some(*call_id),
             PendingPjsuaOp::StartLoop { call_id, .. } => Some(*call_id),
             PendingPjsuaOp::StartStreaming { call_id, .. } => Some(*call_id),
             PendingPjsuaOp::StartTestTone { call_id } => Some(*call_id),
@@ -386,6 +390,9 @@ fn process_pending_pjsua_ops() {
                 if let Err(e) = play_audio_to_call_direct_internal(call_id, &samples) {
                     tracing::warn!("Failed to play direct audio to call {}: {}", call_id, e);
                 }
+            }
+            PendingPjsuaOp::StopDirect { call_id } => {
+                super::ffi::direct_player::stop_direct_audio_to_call_internal(call_id);
             }
             PendingPjsuaOp::StartStreaming {
                 call_id,

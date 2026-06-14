@@ -283,6 +283,8 @@ pub enum PendingPjsuaOp {
     /// Play samples directly to a call (for join sounds)
     /// Note: This also stops any active looping player for the call first
     PlayDirect { call_id: CallId, samples: Vec<i16> },
+    /// Stop one-shot direct players for a call.
+    StopDirect { call_id: CallId },
     /// Start streaming audio from a file to a call (for large easter egg files)
     /// Uses pull model for precise timing - audio thread pulls frames as needed
     StartStreaming {
@@ -377,6 +379,13 @@ pub static CHANNEL_DRAIN_CACHE: OnceLock<DashMap<Snowflake, DrainCacheEntry>> = 
 /// Used for playing audio directly to a single call without going through channel buffer
 pub static DIRECT_PLAYER_STATE: OnceLock<Mutex<HashMap<usize, DirectPlayerEntry>>> =
     OnceLock::new();
+
+/// call_id -> direct player port keys.
+pub static DIRECT_PLAYER_PORTS: OnceLock<Mutex<HashMap<CallId, HashSet<usize>>>> =
+    OnceLock::new();
+
+/// direct player port key -> call_id.
+pub static DIRECT_PLAYER_CALLS: OnceLock<Mutex<HashMap<usize, CallId>>> = OnceLock::new();
 
 /// Memory pool for direct player ports
 pub static DIRECT_PLAYER_POOL: OnceLock<Mutex<SendablePool>> = OnceLock::new();

@@ -93,6 +93,8 @@ pub enum SipCommand {
     /// Play audio directly to a call (bypasses channel buffer)
     /// Used for join sounds to avoid buffer overflow with Discord audio
     PlayDirectToCall { call_id: CallId, samples: Vec<i16> },
+    /// Stop one-shot direct audio currently playing to a call.
+    StopDirectToCall { call_id: CallId },
     /// Start a looping audio player for early media (183 Session Progress)
     StartConnectingLoop { call_id: CallId, samples: Vec<i16> },
     /// Hangup a call
@@ -363,6 +365,9 @@ fn process_sip_command(cmd: SipCommand, calls: &Arc<DashMap<CallId, CallState>>)
             if let Err(e) = play_audio_to_call_direct(call_id, &samples) {
                 tracing::error!("Failed to play direct audio to call {}: {}", call_id, e);
             }
+        }
+        SipCommand::StopDirectToCall { call_id } => {
+            stop_direct_audio_to_call(call_id);
         }
         SipCommand::StartConnectingLoop { call_id, samples } => {
             // Queue to audio thread to avoid race with pjmedia_port_get_frame
