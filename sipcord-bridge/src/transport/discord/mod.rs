@@ -678,10 +678,13 @@ async fn handle_call_command(
         Ok(req) => {
             let extension = req.discord_username.clone();
             match cfg.request_tx.send(req) {
-                Ok(()) => format!(
-                    "Dialing extension `{}` from your current voice channel.",
-                    extension
-                ),
+                Ok(()) => {
+                    set_call_nickname_for_extension(command.guild_id, cfg, &extension).await;
+                    format!(
+                        "Dialing extension `{}` from your current voice channel.",
+                        extension
+                    )
+                }
                 Err(_) => "Outbound call queue is unavailable right now.".to_string(),
             }
         }
@@ -793,16 +796,89 @@ async fn handle_directory_button(
         "/directory",
     ) {
         Ok(req) => match cfg.request_tx.send(req) {
-            Ok(()) => format!(
-                "Dialing `{}` (`{}`) from your current voice channel.",
-                entry.label, entry.extension
-            ),
+            Ok(()) => {
+                set_call_nickname(component.guild_id, cfg, &entry.label).await;
+                format!(
+                    "Dialing `{}` (`{}`) from your current voice channel.",
+                    entry.label, entry.extension
+                )
+            }
             Err(_) => "Outbound call queue is unavailable right now.".to_string(),
         },
         Err(msg) => msg,
     };
 
     respond_to_component(ctx, component, &response).await;
+}
+
+async fn set_call_nickname_for_extension(
+    guild_id: Option<GuildId>,
+    cfg: &DiscordOutboundCallConfig,
+    extension: &str,
+) {
+    let display_name = cfg
+        .phone_directory
+        .iter()
+        .find(|entry| entry.extension == extension)
+        .map(|entry| entry.label.as_str())
+        .unwrap_or(extension);
+
+    set_call_nickname(guild_id, cfg, display_name).await;
+}
+
+async fn set_call_nickname(
+    guild_id: Option<GuildId>,
+    cfg: &DiscordOutboundCallConfig,
+    display_name: &str,
+) {
+    let Some(guild_id) = guild_id else {
+        return;
+    };
+
+    let nickname = call_nickname(display_name);
+    let url = format!(
+        "https://discord.com/api/v10/guilds/{}/members/@me",
+        guild_id.get()
+    );
+
+    let result = reqwest::Client::new()
+        .patch(url)
+        .header("Authorization", format!("Bot {}", cfg.bot_token))
+        .json(&serde_json::json!({ "nick": nickname }))
+        .send()
+        .await;
+
+    match result {
+        Ok(response) if response.status().is_success() => {
+            debug!(
+                "Set bot nickname in guild {} while calling {}",
+                guild_id, display_name
+            );
+        }
+        Ok(response) => {
+            warn!(
+                "Failed to set bot nickname in guild {}: HTTP {}",
+                guild_id,
+                response.status()
+            );
+        }
+        Err(e) => {
+            warn!("Failed to set bot nickname in guild {}: {}", guild_id, e);
+        }
+    }
+}
+
+fn call_nickname(display_name: &str) -> String {
+    const MAX_NICKNAME_CHARS: usize = 32;
+    let trimmed = display_name.trim();
+    let name = if trimmed.is_empty() { "Unknown" } else { trimmed };
+    if name.chars().count() <= MAX_NICKNAME_CHARS {
+        return name.to_string();
+    }
+
+    let mut out: String = name.chars().take(MAX_NICKNAME_CHARS - 3).collect();
+    out.push_str("...");
+    out
 }
 
 fn build_directory_response(entries: &[PhoneDirectoryEntry]) -> CreateInteractionResponseMessage {
@@ -941,10 +1017,9 @@ fn build_hangup_request(
     let requested_by = command
         .member
         .as_ref()
-        .and_then(|member| member.nick.clone())
-        .or_else(|| command.user.global_name.clone())
-        .unwrap_or_else(|| command.user.name.clone())
-        .to_string();
+        .and_then(|member| member.nick.as_ref().map(ToString::to_string))
+        .or_else(|| command.user.global_name.as_ref().map(ToString::to_string))
+        .unwrap_or_else(|| command.user.name.to_string());
 
     Ok(HangupCallRequest {
         request_id: format!("hangup-{}", command.id),

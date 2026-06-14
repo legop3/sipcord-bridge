@@ -47,7 +47,9 @@ Use this URL format, replacing `YOUR_CLIENT_ID`:
 ```
 https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&permissions=36700160
 ```
-The bot needs Connect + Speak permissions in voice channels.
+The bot needs Connect + Speak permissions in voice channels. If you want the
+bot nickname to change to the phone/person being called, also grant Change
+Nickname.
 
 ### 2. Get Discord channel IDs
 
@@ -263,6 +265,9 @@ Behavior:
   command was run.
 - `/directory` opens the configured phone directory as Discord buttons. Clicking
   a phone button behaves like `/call` for that extension.
+- When a Discord-originated call starts, the bot tries to set its server
+  nickname to the matching phone directory label. If the extension is not in the
+  directory, it uses the dialed extension.
 
 Current scope:
 - `/call` is implemented for the static self-host backend.
