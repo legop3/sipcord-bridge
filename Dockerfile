@@ -120,14 +120,19 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /opt/piper /opt/piper-voices && \
-    curl -fL https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz \
+    curl -fL --connect-timeout 30 --max-time 300 --retry 3 --retry-delay 2 \
+        https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz \
         | tar -xzf - -C /opt && \
     printf '#!/bin/sh\nLD_LIBRARY_PATH=/opt/piper exec /opt/piper/piper "$@"\n' \
         > /usr/local/bin/piper && \
     chmod +x /usr/local/bin/piper && \
-    curl -fL -o /opt/piper-voices/en_US-amy-medium.onnx \
+    curl -fL --connect-timeout 30 --max-time 600 --retry 3 --retry-delay 2 \
+        -H "User-Agent: Mozilla/5.0" \
+        -o /opt/piper-voices/en_US-amy-medium.onnx \
         https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx && \
-    curl -fL -o /opt/piper-voices/en_US-amy-medium.onnx.json \
+    curl -fL --connect-timeout 30 --max-time 60 --retry 3 --retry-delay 2 \
+        -H "User-Agent: Mozilla/5.0" \
+        -o /opt/piper-voices/en_US-amy-medium.onnx.json \
         https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json
 
 WORKDIR /app
