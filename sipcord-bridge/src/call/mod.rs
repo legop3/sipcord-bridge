@@ -16,7 +16,10 @@
 
 use crate::fax::session::FaxSession;
 use crate::fax::spandsp::FaxT38Receiver;
-use crate::routing::{Backend, CallError, CallStartedInfo, OutboundCallRequest, RouteDecision};
+use crate::routing::{
+    Backend, CallError, CallStartedInfo, MenuOptionRoute, MenuRoute, OutboundCallRequest,
+    RouteDecision,
+};
 use crate::services::snowflake::Snowflake;
 use crate::services::sound::{SoundManager, create_sound_manager};
 use crate::transport::discord::{
@@ -36,6 +39,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
@@ -109,6 +113,7 @@ struct BridgeContext {
     /// Notify waiters when a pending bridge completes (or fails)
     bridge_ready_notifiers: Arc<DashMap<Snowflake, Arc<Notify>>>,
     sip_calls: Arc<DashMap<CallId, SipCallInfo>>,
+    dtmf_waiters: Arc<DashMap<CallId, mpsc::UnboundedSender<char>>>,
     /// Active fax sessions keyed by SIP call ID.
     /// Each entry holds the session and a cancellation token for the T.38 processing task.
     fax_sessions: Arc<DashMap<CallId, FaxSessionEntry>>,
@@ -129,6 +134,7 @@ pub struct BridgeCoordinator {
     pending_bridges: Arc<DashSet<Snowflake>>,
     bridge_ready_notifiers: Arc<DashMap<Snowflake, Arc<Notify>>>,
     sip_calls: Arc<DashMap<CallId, SipCallInfo>>,
+    dtmf_waiters: Arc<DashMap<CallId, mpsc::UnboundedSender<char>>>,
     /// Active fax sessions keyed by SIP call ID.
     /// Each entry holds the session and a cancellation token for the T.38 processing task.
     fax_sessions: Arc<DashMap<CallId, FaxSessionEntry>>,
@@ -162,6 +168,7 @@ impl BridgeCoordinator {
             pending_bridges: Arc::new(DashSet::new()),
             bridge_ready_notifiers: Arc::new(DashMap::new()),
             sip_calls: Arc::new(DashMap::new()),
+            dtmf_waiters: Arc::new(DashMap::new()),
             fax_sessions: Arc::new(DashMap::new()),
             outbound_requests: Arc::new(DashMap::new()),
             discord_event_tx,
@@ -186,6 +193,7 @@ impl BridgeCoordinator {
             pending_bridges: self.pending_bridges.clone(),
             bridge_ready_notifiers: self.bridge_ready_notifiers.clone(),
             sip_calls: self.sip_calls.clone(),
+            dtmf_waiters: self.dtmf_waiters.clone(),
             fax_sessions: self.fax_sessions.clone(),
             discord_event_tx: self.discord_event_tx.clone(),
             sip_cmd_tx: self.sip_cmd_tx.clone(),
@@ -268,6 +276,7 @@ impl BridgeCoordinator {
                     }
 
                     SipEvent::CallEnded { call_id } => {
+                        ctx.dtmf_waiters.remove(&call_id);
                         unregister_call_channel(call_id);
                         stop_loop(call_id);
 
@@ -357,6 +366,17 @@ impl BridgeCoordinator {
                                     bridge.discord_connection.disconnect().await;
                                 }
                             }
+                        }
+                    }
+
+                    SipEvent::Dtmf { call_id, digit } => {
+                        if let Some(waiter) = ctx.dtmf_waiters.get(&call_id) {
+                            let _ = waiter.send(digit);
+                        } else {
+                            debug!(
+                                "Ignoring DTMF {} on call {} (no active waiter)",
+                                digit, call_id
+                            );
                         }
                     }
 
@@ -1025,6 +1045,7 @@ async fn handle_incoming_call(
         pending_bridges,
         bridge_ready_notifiers,
         sip_calls,
+        dtmf_waiters,
         fax_sessions,
         discord_event_tx,
         sip_cmd_tx,
@@ -1035,9 +1056,13 @@ async fn handle_incoming_call(
     // Route the call via the backend FIRST to determine call type
     let decision = backend.route_call(&digest_auth, &extension).await;
 
-    // For non-fax calls: send 183 Session Progress and play connecting sound
-    let is_fax = matches!(decision, RouteDecision::ConnectFax { .. });
-    if !is_fax {
+    // For normal voice calls: send 183 Session Progress and play connecting sound.
+    // Menu calls are answered immediately so the caller can hear prompts and send DTMF.
+    let use_connecting_audio = !matches!(
+        decision,
+        RouteDecision::ConnectFax { .. } | RouteDecision::Menu { .. }
+    );
+    if use_connecting_audio {
         let _ = sip_cmd_tx.send(SipCommand::Send183 { call_id });
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1150,6 +1175,28 @@ async fn handle_incoming_call(
 
             // NOTE: No on_call_started notification for fax calls — the "called in" / "hung up"
             // Discord embeds are only relevant for voice calls. Fax has its own notifications.
+        }
+
+        RouteDecision::Menu { menu } => {
+            handle_menu_call(
+                MenuCallContext {
+                    backend,
+                    bridges,
+                    pending_bridges,
+                    bridge_ready_notifiers,
+                    sip_calls,
+                    dtmf_waiters,
+                    discord_event_tx,
+                    sip_cmd_tx,
+                    sound_manager,
+                    shared_discord,
+                    health_check_notify,
+                },
+                call_id,
+                extension,
+                menu,
+            )
+            .await;
         }
 
         RouteDecision::Connect {
@@ -1401,6 +1448,328 @@ async fn handle_incoming_call(
     }
 }
 
+struct MenuCallContext {
+    backend: Arc<dyn Backend>,
+    bridges: Arc<DashMap<Snowflake, ChannelBridge>>,
+    pending_bridges: Arc<DashSet<Snowflake>>,
+    bridge_ready_notifiers: Arc<DashMap<Snowflake, Arc<Notify>>>,
+    sip_calls: Arc<DashMap<CallId, SipCallInfo>>,
+    dtmf_waiters: Arc<DashMap<CallId, mpsc::UnboundedSender<char>>>,
+    discord_event_tx: Sender<DiscordEvent>,
+    sip_cmd_tx: Sender<SipCommand>,
+    sound_manager: Arc<SoundManager>,
+    shared_discord: Arc<SharedDiscordClient>,
+    health_check_notify: Arc<Notify>,
+}
+
+async fn handle_menu_call(
+    ctx: MenuCallContext,
+    call_id: CallId,
+    extension: String,
+    menu: MenuRoute,
+) {
+    info!(
+        "Starting menu {} for call {} on extension {}",
+        menu.id, call_id, extension
+    );
+
+    let _ = ctx.sip_cmd_tx.send(SipCommand::Answer { call_id });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let (dtmf_tx, mut dtmf_rx) = mpsc::unbounded_channel();
+    ctx.dtmf_waiters.insert(call_id, dtmf_tx);
+
+    let max_attempts = menu.max_attempts.max(1);
+    let mut attempts = 0u8;
+    let selected = loop {
+        if !ctx.sip_calls.contains_key(&call_id) {
+            ctx.dtmf_waiters.remove(&call_id);
+            return;
+        }
+
+        if let Some(prompt) = menu.prompt.as_deref() {
+            play_named_prompt(call_id, prompt, &ctx.sound_manager, &ctx.sip_cmd_tx).await;
+        }
+
+        let digit = match tokio::time::timeout(
+            Duration::from_secs(menu.timeout_seconds.max(1)),
+            dtmf_rx.recv(),
+        )
+        .await
+        {
+            Ok(Some(digit)) => digit,
+            Ok(None) => {
+                warn!("Menu {} DTMF channel closed for call {}", menu.id, call_id);
+                ctx.dtmf_waiters.remove(&call_id);
+                let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
+                return;
+            }
+            Err(_) => {
+                attempts = attempts.saturating_add(1);
+                warn!(
+                    "Menu {} timed out waiting for DTMF on call {} ({}/{})",
+                    menu.id, call_id, attempts, max_attempts
+                );
+                if attempts >= max_attempts {
+                    ctx.dtmf_waiters.remove(&call_id);
+                    let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
+                    return;
+                }
+                if let Some(invalid_prompt) = menu.invalid_prompt.as_deref() {
+                    play_named_prompt(call_id, invalid_prompt, &ctx.sound_manager, &ctx.sip_cmd_tx)
+                        .await;
+                }
+                continue;
+            }
+        };
+
+        if digit == '#' {
+            info!("Repeating menu {} for call {}", menu.id, call_id);
+            continue;
+        }
+
+        if let Some(option) = menu.options.get(&digit) {
+            break option.clone();
+        }
+
+        attempts = attempts.saturating_add(1);
+        warn!(
+            "Invalid menu digit {} for menu {} on call {} ({}/{})",
+            digit, menu.id, call_id, attempts, max_attempts
+        );
+        if attempts >= max_attempts {
+            ctx.dtmf_waiters.remove(&call_id);
+            let _ = ctx.sip_cmd_tx.send(SipCommand::Hangup { call_id });
+            return;
+        }
+        if let Some(invalid_prompt) = menu.invalid_prompt.as_deref() {
+            play_named_prompt(call_id, invalid_prompt, &ctx.sound_manager, &ctx.sip_cmd_tx).await;
+        }
+    };
+
+    ctx.dtmf_waiters.remove(&call_id);
+    connect_menu_selection(ctx, call_id, extension, selected).await;
+}
+
+async fn play_named_prompt(
+    call_id: CallId,
+    sound_name: &str,
+    sound_manager: &SoundManager,
+    sip_cmd_tx: &Sender<SipCommand>,
+) {
+    if let Some(sound) = sound_manager.get_preloaded(sound_name) {
+        info!("Playing menu prompt '{}' for call {}", sound_name, call_id);
+        let _ = sip_cmd_tx.send(SipCommand::PlayDirectToCall {
+            call_id,
+            samples: (*sound.samples).clone(),
+        });
+        tokio::time::sleep(Duration::from_millis(sound.duration_ms + 100)).await;
+    } else {
+        warn!("Menu prompt sound '{}' is not preloaded or does not exist", sound_name);
+    }
+}
+
+async fn connect_menu_selection(
+    ctx: MenuCallContext,
+    call_id: CallId,
+    extension: String,
+    selected: MenuOptionRoute,
+) {
+    let channel_id = selected.channel_id;
+    let guild_id = selected.guild_id;
+    let user_id = "menu".to_string();
+    let bot_token = ctx.backend.bot_token().to_string();
+
+    info!(
+        "Menu call {} selected channel {} ({})",
+        call_id,
+        channel_id,
+        selected.label.as_deref().unwrap_or("unlabeled")
+    );
+
+    let mut conflicting_channel: Option<Snowflake> = None;
+    for entry in ctx.bridges.iter() {
+        let existing_channel_id = *entry.key();
+        let existing_bridge = entry.value();
+
+        if existing_bridge.guild_id == guild_id && existing_channel_id != channel_id {
+            conflicting_channel = Some(existing_channel_id);
+            break;
+        }
+    }
+
+    if let Some(existing_channel_id) = conflicting_channel {
+        warn!(
+            "Guild {} already has active bridge to channel {} (menu call {} tried to join channel {})",
+            guild_id, existing_channel_id, call_id, channel_id
+        );
+        play_error_and_hangup(
+            call_id,
+            CallError::ServerBusy,
+            &ctx.sound_manager,
+            &ctx.sip_cmd_tx,
+        )
+        .await;
+        ctx.sip_calls.remove(&call_id);
+        return;
+    }
+
+    let bridge_exists = ctx.bridges.contains_key(&channel_id);
+    let bridge_pending = ctx.pending_bridges.contains(&channel_id);
+
+    if bridge_pending && !bridge_exists {
+        info!(
+            "Menu call {} waiting for pending bridge for channel {}",
+            call_id, channel_id
+        );
+        let notify = ctx
+            .bridge_ready_notifiers
+            .entry(channel_id)
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone();
+
+        let wait_result = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if ctx.bridges.contains_key(&channel_id)
+                    || !ctx.pending_bridges.contains(&channel_id)
+                {
+                    return true;
+                }
+                if !ctx.sip_calls.contains_key(&call_id) {
+                    return false;
+                }
+                notify.notified().await;
+            }
+        })
+        .await;
+
+        if !matches!(wait_result, Ok(true)) {
+            play_error_and_hangup(
+                call_id,
+                CallError::Unknown,
+                &ctx.sound_manager,
+                &ctx.sip_cmd_tx,
+            )
+            .await;
+            ctx.sip_calls.remove(&call_id);
+            return;
+        }
+    }
+
+    if ctx.bridges.contains_key(&channel_id) {
+        if !ctx.sip_calls.contains_key(&call_id) {
+            warn!("Menu call {} ended during routing", call_id);
+            return;
+        }
+
+        if let Some(mut call) = ctx.sip_calls.get_mut(&call_id) {
+            call.channel_id = Some(channel_id);
+            call._user_id = Some(user_id.clone());
+            call._guild_id = Some(guild_id);
+        }
+
+        if let Some(mut bridge) = ctx.bridges.get_mut(&channel_id) {
+            bridge.sip_calls.insert(call_id);
+            bridge.last_call_time = Instant::now();
+        }
+
+        register_call_channel(call_id, channel_id);
+        let backend = ctx.backend.clone();
+        let info = CallStartedInfo {
+            sip_call_id: call_id.to_string(),
+            user_id,
+            guild_id: guild_id.to_string(),
+            channel_id: channel_id.to_string(),
+            extension,
+        };
+        tokio::spawn(async move {
+            backend.on_call_started(&info).await;
+        });
+        play_discord_join(call_id, &ctx.sound_manager, &ctx.sip_cmd_tx).await;
+        return;
+    }
+
+    if !ctx.sip_calls.contains_key(&call_id) {
+        warn!("Menu call {} ended before creating bridge", call_id);
+        return;
+    }
+
+    ctx.pending_bridges.insert(channel_id);
+    let bridge_id = format!("bridge_{}", channel_id);
+    match DiscordVoiceConnection::connect(
+        bridge_id,
+        &ctx.shared_discord,
+        guild_id,
+        channel_id,
+        ctx.discord_event_tx.clone(),
+        ctx.health_check_notify.clone(),
+    )
+    .await
+    {
+        Ok(connection) => {
+            if !ctx.sip_calls.contains_key(&call_id) {
+                connection.disconnect().await;
+                ctx.pending_bridges.remove(&channel_id);
+                notify_bridge_ready(&ctx.bridge_ready_notifiers, channel_id);
+                return;
+            }
+
+            setup_channel_ring_buffers(channel_id);
+            let mut sip_calls_set = HashSet::new();
+            sip_calls_set.insert(call_id);
+            ctx.bridges.insert(
+                channel_id,
+                ChannelBridge {
+                    guild_id,
+                    discord_connection: connection,
+                    sip_calls: sip_calls_set,
+                    bot_token,
+                    last_call_time: Instant::now(),
+                    created_at: Instant::now(),
+                    reconnect_attempts: 0,
+                    last_reconnect_at: None,
+                },
+            );
+
+            ctx.pending_bridges.remove(&channel_id);
+            notify_bridge_ready(&ctx.bridge_ready_notifiers, channel_id);
+
+            if let Some(mut call) = ctx.sip_calls.get_mut(&call_id) {
+                call.channel_id = Some(channel_id);
+                call._user_id = Some(user_id.clone());
+                call._guild_id = Some(guild_id);
+            }
+
+            register_call_channel(call_id, channel_id);
+            let backend = ctx.backend.clone();
+            let info = CallStartedInfo {
+                sip_call_id: call_id.to_string(),
+                user_id,
+                guild_id: guild_id.to_string(),
+                channel_id: channel_id.to_string(),
+                extension,
+            };
+            tokio::spawn(async move {
+                backend.on_call_started(&info).await;
+            });
+            play_discord_join(call_id, &ctx.sound_manager, &ctx.sip_cmd_tx).await;
+        }
+        Err(e) => {
+            ctx.pending_bridges.remove(&channel_id);
+            notify_bridge_ready(&ctx.bridge_ready_notifiers, channel_id);
+            error!("Failed to connect menu call {} to Discord: {}", call_id, e);
+            play_error_and_hangup(
+                call_id,
+                CallError::Unknown,
+                &ctx.sound_manager,
+                &ctx.sip_cmd_tx,
+            )
+            .await;
+            ctx.sip_calls.remove(&call_id);
+        }
+    }
+}
+
 /// Handle an outbound call that was answered (phone picked up)
 ///
 /// This mirrors handle_incoming_call but skips authentication (already done by the DO)
@@ -1417,6 +1786,7 @@ async fn handle_outbound_call_answered(
         pending_bridges,
         bridge_ready_notifiers,
         sip_calls,
+        dtmf_waiters: _,
         fax_sessions: _,
         discord_event_tx,
         sip_cmd_tx,

@@ -7,6 +7,17 @@ This means you have to build the call routing backend yourself. I am including a
 [extensions]
 1000 = { guild = "123456789012345620", channel = "987654321012345620" }
 2000 = { guild = "123456789012345620", channel = "111222333444555620" }
+
+[menus.main]
+extension = "8000"
+prompt = "main_menu"
+invalid_prompt = "invalid"
+timeout_seconds = 10
+max_attempts = 3
+
+[menus.main.options]
+1 = { guild = "123456789012345620", channel = "987654321012345620", label = "Lobby" }
+2 = { guild = "123456789012345620", channel = "111222333444555620", label = "Workshop" }
 ```
 but if you want more fancy routing you have to build it. You can easily use sipcord-bridge as a library and provide your own routers by implementing the `Backend` trait.
 
@@ -55,6 +66,26 @@ Create a `dialplan.toml` mapping extensions to Discord channels:
 ```
 
 Each extension is what you'll dial from your SIP phone. Pick any numbers you like.
+
+You can also add a simple phone menu. A caller dials the menu extension, hears
+the prompt, presses a digit, and Sipcord joins the selected Discord voice
+channel:
+
+```toml
+[menus.main]
+extension = "8000"
+prompt = "main_menu"
+invalid_prompt = "invalid"
+timeout_seconds = 10
+max_attempts = 3
+
+[menus.main.options]
+1 = { guild = "123456789012345678", channel = "987654321012345678", label = "Lobby" }
+2 = { guild = "123456789012345678", channel = "111222333444555666", label = "Workshop" }
+```
+
+`prompt` and `invalid_prompt` are optional sound names from `config.toml`.
+They must be preloaded 16kHz mono audio files. Press `#` to repeat the menu.
 
 ### 4a. Run with Docker (recommended)
 
@@ -190,6 +221,10 @@ You should see an `INVITE sip:1101@192.168.0.100:5060`, followed by the digest
 challenge, a second INVITE with auth, a `200 OK`, and an `ACK`. If the call ends
 after about 32 seconds, check that `SIP_PUBLIC_HOST` and `RTP_PUBLIC_IP` are set
 to the bridge host address, not the FreePBX address and not `0.0.0.0`.
+
+For a menu extension, route the menu number the same way. For example, dialing
+`88000` can strip the `8` prefix and send `8000` to Sipcord, where
+`[menus.main] extension = "8000"` answers and collects DTMF.
 
 ### 4c. Discord -> extension calling
 

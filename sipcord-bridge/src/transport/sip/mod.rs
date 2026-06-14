@@ -49,6 +49,8 @@ pub enum SipEvent {
     },
     /// Call ended
     CallEnded { call_id: CallId },
+    /// DTMF digit received on a call
+    Dtmf { call_id: CallId, digit: char },
     /// Call timed out due to RTP inactivity (no audio received for extended period)
     /// rx_count is the total RTP packets received before timeout (0 = never got any audio)
     CallTimeout { call_id: CallId, rx_count: u64 },
@@ -276,11 +278,13 @@ fn run_pjsua_loop(
             }
         }),
         on_dtmf: Box::new({
+            let event_tx = event_tx.clone();
             move |call_id, digit| {
                 debug!(
-                    "DTMF {} on call {} (ignored - using dialed number)",
+                    "DTMF {} on call {}",
                     digit, call_id
                 );
+                let _ = event_tx.send(SipEvent::Dtmf { call_id, digit });
             }
         }),
         on_call_ended: Box::new({

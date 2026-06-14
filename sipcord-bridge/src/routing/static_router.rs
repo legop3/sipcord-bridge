@@ -23,7 +23,8 @@ use tracing::info;
 
 use crate::config::ConfigError;
 use crate::routing::{
-    Backend, CallError, CallStartedInfo, HangupCallRequest, OutboundCallRequest, RouteDecision,
+    Backend, CallError, CallStartedInfo, HangupCallRequest, MenuOptionRoute, MenuRoute,
+    OutboundCallRequest, RouteDecision,
 };
 use crate::services::snowflake::Snowflake;
 use crate::transport::sip::DigestAuthParams;
@@ -34,9 +35,39 @@ struct ExtensionTarget {
     channel: Snowflake,
 }
 
+#[derive(Deserialize, Clone)]
+struct MenuOptionTarget {
+    guild: Snowflake,
+    channel: Snowflake,
+    label: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct MenuConfig {
+    extension: String,
+    prompt: Option<String>,
+    invalid_prompt: Option<String>,
+    #[serde(default = "default_menu_timeout_seconds")]
+    timeout_seconds: u64,
+    #[serde(default = "default_menu_max_attempts")]
+    max_attempts: u8,
+    options: HashMap<String, MenuOptionTarget>,
+}
+
 #[derive(Deserialize)]
 struct Dialplan {
+    #[serde(default)]
     extensions: HashMap<String, ExtensionTarget>,
+    #[serde(default)]
+    menus: HashMap<String, MenuConfig>,
+}
+
+fn default_menu_timeout_seconds() -> u64 {
+    10
+}
+
+fn default_menu_max_attempts() -> u8 {
+    3
 }
 
 /// Static file-based routing backend.
@@ -47,6 +78,7 @@ struct Dialplan {
 pub struct StaticBackend {
     bot_token: String,
     extensions: HashMap<String, ExtensionTarget>,
+    menus: HashMap<String, MenuConfig>,
     outbound_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<OutboundCallRequest>>>,
     hangup_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<HangupCallRequest>>>,
 }
@@ -79,10 +111,22 @@ impl StaticBackend {
                 ext, target.guild, target.channel
             );
         }
+        if !dialplan.menus.is_empty() {
+            info!("Loaded {} static menu(s)", dialplan.menus.len());
+            for (id, menu) in &dialplan.menus {
+                info!(
+                    "  menu {} on ext {} ({} options)",
+                    id,
+                    menu.extension,
+                    menu.options.len()
+                );
+            }
+        }
 
         Ok(Self {
             bot_token,
             extensions: dialplan.extensions,
+            menus: dialplan.menus,
             outbound_rx: Arc::new(Mutex::new(outbound_rx)),
             hangup_rx: Arc::new(Mutex::new(hangup_rx)),
         })
@@ -96,6 +140,39 @@ impl Backend for StaticBackend {
     }
 
     async fn route_call(&self, _digest_auth: &DigestAuthParams, extension: &str) -> RouteDecision {
+        if let Some((id, menu)) = self
+            .menus
+            .iter()
+            .find(|(_, menu)| menu.extension == extension)
+        {
+            let options = menu
+                .options
+                .iter()
+                .filter_map(|(digit, target)| {
+                    let digit = digit.chars().next()?;
+                    Some((
+                        digit,
+                        MenuOptionRoute {
+                            guild_id: target.guild,
+                            channel_id: target.channel,
+                            label: target.label.clone(),
+                        },
+                    ))
+                })
+                .collect();
+
+            return RouteDecision::Menu {
+                menu: MenuRoute {
+                    id: id.clone(),
+                    prompt: menu.prompt.clone(),
+                    invalid_prompt: menu.invalid_prompt.clone(),
+                    timeout_seconds: menu.timeout_seconds,
+                    max_attempts: menu.max_attempts,
+                    options,
+                },
+            };
+        }
+
         match self.extensions.get(extension) {
             Some(target) => RouteDecision::Connect {
                 channel_id: target.channel,
@@ -219,6 +296,54 @@ mod tests {
                     assert!(matches!(error, CallError::NoChannelMapping));
                 }
                 _ => panic!("Expected RejectWithError"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_route_menu_extension() {
+        let toml_content = r#"
+[menus.main]
+extension = "8000"
+prompt = "main_menu"
+invalid_prompt = "invalid"
+timeout_seconds = 7
+max_attempts = 2
+
+[menus.main.options]
+1 = { guild = 111, channel = 222, label = "Lobby" }
+2 = { guild = 333, channel = 444, label = "Workshop" }
+"#;
+        let dir = std::env::temp_dir().join("sipcord_test_dialplan");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("test_route_menu.toml");
+        std::fs::write(&path, toml_content).unwrap();
+
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_hangup_tx, hangup_rx) = tokio::sync::mpsc::unbounded_channel();
+        let backend = StaticBackend::load(&path, "tok".to_string(), rx, hangup_rx).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let decision = backend
+                .route_call(&DigestAuthParams::default(), "8000")
+                .await;
+            match decision {
+                RouteDecision::Menu { menu } => {
+                    assert_eq!(menu.id, "main");
+                    assert_eq!(menu.prompt.as_deref(), Some("main_menu"));
+                    assert_eq!(menu.invalid_prompt.as_deref(), Some("invalid"));
+                    assert_eq!(menu.timeout_seconds, 7);
+                    assert_eq!(menu.max_attempts, 2);
+                    assert_eq!(menu.options.get(&'1').unwrap().channel_id, Snowflake::new(222));
+                    assert_eq!(
+                        menu.options.get(&'2').unwrap().label.as_deref(),
+                        Some("Workshop")
+                    );
+                }
+                _ => panic!("Expected Menu"),
             }
         });
     }
