@@ -1942,7 +1942,7 @@ async fn synthesize_tts_samples(
         .arg("--output_file")
         .arg(&raw_path)
         .arg("--speaker_rate")
-        .arg("0.5")
+        .arg("0.4")
         .stdin(Stdio::piped())
         .spawn()?;
 
