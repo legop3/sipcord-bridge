@@ -8,8 +8,8 @@
 //! Example `dialplan.toml`:
 //! ```toml
 //! [extensions]
-//! 1000 = { guild = 123456789012345678, channel = 987654321012345678 }
-//! 2000 = { guild = 123456789012345678, channel = 111222333444555666 }
+//! 1000 = { guild = "123456789012345678", channel = "987654321012345678" }
+//! 2000 = { guild = "123456789012345678", channel = "111222333444555666" }
 //! ```
 
 use std::collections::HashMap;
@@ -128,8 +128,8 @@ mod tests {
     fn test_load_valid_dialplan() {
         let toml_content = r#"
 [extensions]
-1000 = { guild = 123456789012345678, channel = 987654321012345678 }
-2000 = { guild = 123456789012345678, channel = 111222333444555666 }
+1000 = { guild = "123456789012345678", channel = "987654321012345678" }
+2000 = { guild = "123456789012345678", channel = "111222333444555666" }
 "#;
         let dir = std::env::temp_dir().join("sipcord_test_dialplan");
         std::fs::create_dir_all(&dir).ok();

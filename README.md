@@ -5,8 +5,8 @@ This is a slice of the code that powers [SIPcord](https://sipcord.net/) that you
 This means you have to build the call routing backend yourself. I am including a `static-router` backend which you can use to map extensions in a TOML file like this
 ```toml
 [extensions]
-1000 = { guild = 123456789012345620, channel = 987654321012345620 }
-2000 = { guild = 123456789012345620, channel = 111222333444555620 }
+1000 = { guild = "123456789012345620", channel = "987654321012345620" }
+2000 = { guild = "123456789012345620", channel = "111222333444555620" }
 ```
 but if you want more fancy routing you have to build it. You can easily use sipcord-bridge as a library and provide your own routers by implementing the `Backend` trait.
 
@@ -48,8 +48,8 @@ Create a `dialplan.toml` mapping extensions to Discord channels:
 
 ```toml
 [extensions]
-1000 = { guild = 123456789012345678, channel = 987654321012345678 }
-2000 = { guild = 123456789012345678, channel = 111222333444555666 }
+1000 = { guild = "123456789012345678", channel = "987654321012345678" }
+2000 = { guild = "123456789012345678", channel = "111222333444555666" }
 ```
 
 Each extension is what you'll dial from your SIP phone. Pick any numbers you like.
