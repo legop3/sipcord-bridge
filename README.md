@@ -20,14 +20,16 @@ This was written a mix between myself and claude, sure, some of it's big slop bu
 
 **PR's welcome**. No really, feel free to implement it and contribute.
 
-## AI Generated Setup Instructions
+## Self-host setup notes
 
-These instructions were written by Claude. They might be wrong. Remember — no support is provided.
+These notes cover the static-router Docker setup. The bridge maps inbound SIP
+extension digits to Discord voice channels; it does not currently expose a
+static Discord command for placing outbound calls to SIP phones.
 
 ### Prerequisites
 
 - A Discord bot with voice permissions. Create one at https://discord.com/developers/applications, enable the **Message Content** intent, and grab the bot token.
-- A server with a public IP (or port-forwarded UDP). SIP uses UDP 5060 and RTP uses UDP 10000-15000 by default.
+- A Docker host reachable from your PBX or SIP clients. SIP uses port 5060 and RTP uses UDP 10000-15000 by default.
 - Docker (recommended) or Rust nightly toolchain if building from source.
 
 ### 1. Invite the bot to your server
@@ -66,8 +68,15 @@ Create a `.env` file:
 
 ```env
 DISCORD_BOT_TOKEN=your_bot_token_here
-SIP_PUBLIC_HOST=your.server.ip.or.hostname
+SIP_PUBLIC_HOST=192.168.0.100
+RTP_PUBLIC_IP=192.168.0.100
 ```
+
+Set both IPs to the address other SIP devices use to reach the bridge. For
+example, if FreePBX is `192.168.0.25` and this container runs on an OMV host at
+`192.168.0.100`, use `192.168.0.100`. Do not use `0.0.0.0` here; this value is
+advertised in SIP Contact/SDP headers, and callers must be able to route back to
+it.
 
 Create a `docker-compose.yml`:
 
@@ -95,16 +104,87 @@ docker logs -f sipcord-bridge
 
 You should see it load the dialplan and start listening.
 
+For a LAN deployment on an OMV host at `192.168.0.100`, startup should include
+lines like:
+
+```text
+Static router running on 192.168.0.100:5060
+Public host Contact rewriting enabled: 192.168.0.100:5060
+Account RTP config: ... public_addr=192.168.0.100
+```
+
 Images are published by GitHub Actions to `ghcr.io/legop3/sipcord-bridge`
 on pushes to `master`, version tags like `v2.1.2`, and manual workflow runs.
 If the package is private, make it public in the GitHub package settings or
 log in to GHCR from your OMV host before pulling.
 
-For a FreePBX trunk, point the trunk host at your Docker host and send the
-extension digits you configured in `dialplan.toml`. The static router ignores
-SIP usernames/passwords and routes only by the dialed extension.
+### 4b. FreePBX trunk example
 
-### 4b. Build from source
+Create a PJSIP trunk that points at the Docker host running the bridge. For
+example, if FreePBX is `192.168.0.25` and the bridge container is on
+`192.168.0.100`, the trunk should point at `192.168.0.100`.
+
+PJSIP trunk, General:
+
+```text
+Trunk Name: sipcord
+SIP Server: 192.168.0.100
+SIP Server Port: 5060
+Authentication: Outbound
+Registration: None
+Username: sipcord
+Secret: any-random-string
+```
+
+PJSIP trunk, Advanced:
+
+```text
+Client URI: sip:sipcord@192.168.0.100:5060
+Server URI: sip:192.168.0.100:5060
+From Domain: 192.168.0.100
+Contact User: sipcord
+Transport: UDP
+Direct Media: No
+RTP Symmetric: Yes
+Force rport: Yes
+Rewrite Contact: Yes
+```
+
+The bridge challenges inbound SIP requests, but the static router does not make
+authorization decisions from the username/password. Configure outbound
+credentials in FreePBX so it can answer the SIP digest challenge; the bridge
+routes by the dialed extension in `dialplan.toml`.
+
+Create an outbound route such as:
+
+```text
+Route Name: sipcord
+Trunk Sequence: sipcord
+Dial pattern prefix: 8
+Dial pattern match: 1101
+```
+
+With that route, dialing `81101` from a FreePBX extension sends `1101` to the
+bridge, which matches:
+
+```toml
+[extensions]
+1101 = { guild = "668249361339383808", channel = "931737080176979968" }
+```
+
+To debug routing from FreePBX:
+
+```bash
+asterisk -rvvv
+pjsip set logger host 192.168.0.100
+```
+
+You should see an `INVITE sip:1101@192.168.0.100:5060`, followed by the digest
+challenge, a second INVITE with auth, a `200 OK`, and an `ACK`. If the call ends
+after about 32 seconds, check that `SIP_PUBLIC_HOST` and `RTP_PUBLIC_IP` are set
+to the bridge host address, not the FreePBX address and not `0.0.0.0`.
+
+### 4c. Build from source
 
 Requires Rust nightly (for `portable_simd`) and system dependencies for pjproject (OpenSSL, Opus, libtiff, etc). See the `Dockerfile` for the full list.
 
@@ -114,15 +194,16 @@ cargo run --release -p sipcord-bridge
 
 The binary reads `config.toml` from the working directory (or `CONFIG_PATH`), the dialplan from `./dialplan.toml` (or `DIALPLAN_PATH`), and sound files from `./wav/` (or `SOUNDS_DIR`).
 
-### 5. Configure your SIP phone
+### 5. Configure a direct SIP phone
 
-Point your SIP client at your server's IP on port 5060 (UDP). The static router does **not** perform authentication, so any SIP client can connect — just dial the extension number you configured.
+Point your SIP client at the bridge host on port 5060. The static router routes
+by dialed extension after the SIP digest handshake.
 
 Example Oink (or any softphone) setup:
-- **SIP Server:** `your.server.ip`
+- **SIP Server:** `192.168.0.100`
 - **Port:** `5060`
 - **Transport:** `UDP`
-- **Username/Password:** anything (ignored by static router)
+- **Username/Password:** anything
 
 Dial `1000` (or whatever you put in `dialplan.toml`) and you should hear the bot join the Discord voice channel.
 
@@ -131,11 +212,11 @@ Dial `1000` (or whatever you put in `dialplan.toml`) and you should hear the bot
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DISCORD_BOT_TOKEN` | *(required)* | Discord bot token |
-| `SIP_PUBLIC_HOST` | *(required)* | Public IP/hostname for SIP |
+| `SIP_PUBLIC_HOST` | *(required)* | Routable IP/hostname advertised in SIP Contact headers |
 | `SIP_PORT` | `5060` | SIP listening port |
 | `RTP_PORT_START` | `10000` | Start of RTP port range |
 | `RTP_PORT_END` | `15000` | End of RTP port range |
-| `RTP_PUBLIC_IP` | *(same as SIP_PUBLIC_HOST)* | Public IP for RTP media (if different from SIP) |
+| `RTP_PUBLIC_IP` | *(local address if unset)* | Routable IP advertised in SDP for RTP media |
 | `CONFIG_PATH` | `./config.toml` | Path to config.toml |
 | `DIALPLAN_PATH` | `./dialplan.toml` | Path to dialplan.toml |
 | `SOUNDS_DIR` | `./wav` | Path to sound files directory |
@@ -145,11 +226,15 @@ Dial `1000` (or whatever you put in `dialplan.toml`) and you should hear the bot
 
 ### NAT / Firewall notes
 
+`SIP_PUBLIC_HOST` is not a bind-all setting. It is written into SIP headers, so
+it must be the address peers should call back. On a LAN, use the Docker host's
+LAN IP. Across NAT, use the public IP or hostname.
+
 If your server is behind NAT, you need to:
 - Forward UDP port 5060 (SIP signaling)
 - Forward UDP ports 10000-15000 (RTP media)
 - Set `SIP_PUBLIC_HOST` to your *public* IP
-- If the public IP for RTP differs from SIP, also set `RTP_PUBLIC_IP`
+- Set `RTP_PUBLIC_IP` to the public RTP address
 
 For servers with both a public and private interface (e.g. behind a load balancer), you can set `SIP_LOCAL_HOST` and `SIP_LOCAL_CIDR` so local clients get the private IP in Contact headers:
 
