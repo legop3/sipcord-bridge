@@ -66,6 +66,7 @@ async fn run_static_router() -> Result<(), BridgeError> {
         outbound_request_rx,
         hangup_request_rx,
     )?);
+    let phone_directory = backend.phone_directory();
 
     // Create SIP transport (no TLS for static router)
     let sip_transport = SipTransport::new(sip_config.clone(), None);
@@ -91,6 +92,7 @@ async fn run_static_router() -> Result<(), BridgeError> {
             request_tx: outbound_request_tx,
             hangup_tx: hangup_request_tx,
             bot_token: bot_token.clone(),
+            phone_directory: phone_directory.clone(),
         });
     let shared_discord = SharedDiscordClient::new(&bot_token, outbound_call_config).await?;
     info!("Shared Discord client initialized");

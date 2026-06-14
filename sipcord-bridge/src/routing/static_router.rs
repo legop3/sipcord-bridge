@@ -14,6 +14,9 @@
 //!
 //! [menus.main]
 //! extension = "8000"
+//!
+//! [phones]
+//! 777 = { label = "Shop speakerphone" }
 //! ```
 
 use std::collections::HashMap;
@@ -28,7 +31,7 @@ use tracing::info;
 use crate::config::ConfigError;
 use crate::routing::{
     Backend, CallError, CallStartedInfo, HangupCallRequest, MenuRoute, OutboundCallRequest,
-    RouteDecision,
+    PhoneDirectoryEntry, RouteDecision,
 };
 use crate::services::snowflake::Snowflake;
 use crate::transport::sip::DigestAuthParams;
@@ -48,12 +51,20 @@ struct MenuConfig {
     max_attempts: u8,
 }
 
+#[derive(Deserialize, Clone)]
+struct PhoneConfig {
+    label: String,
+    extension: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct Dialplan {
     #[serde(default)]
     extensions: HashMap<String, ExtensionTarget>,
     #[serde(default)]
     menus: HashMap<String, MenuConfig>,
+    #[serde(default)]
+    phones: HashMap<String, PhoneConfig>,
 }
 
 fn default_menu_timeout_seconds() -> u64 {
@@ -73,6 +84,7 @@ pub struct StaticBackend {
     bot_token: String,
     extensions: HashMap<String, ExtensionTarget>,
     menus: HashMap<String, MenuConfig>,
+    phones: HashMap<String, PhoneConfig>,
     outbound_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<OutboundCallRequest>>>,
     hangup_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<HangupCallRequest>>>,
 }
@@ -111,14 +123,37 @@ impl StaticBackend {
                 info!("  dynamic menu {} on ext {}", id, menu.extension);
             }
         }
+        if !dialplan.phones.is_empty() {
+            info!("Loaded {} phone directory entries", dialplan.phones.len());
+            for (id, phone) in &dialplan.phones {
+                let extension = phone.extension.as_deref().unwrap_or(id);
+                info!("  phone {} -> {} ({})", id, extension, phone.label);
+            }
+        }
 
         Ok(Self {
             bot_token,
             extensions: dialplan.extensions,
             menus: dialplan.menus,
+            phones: dialplan.phones,
             outbound_rx: Arc::new(Mutex::new(outbound_rx)),
             hangup_rx: Arc::new(Mutex::new(hangup_rx)),
         })
+    }
+
+    /// Phone directory entries exposed through the Discord `/directory` command.
+    pub fn phone_directory(&self) -> Vec<PhoneDirectoryEntry> {
+        let mut entries: Vec<PhoneDirectoryEntry> = self
+            .phones
+            .iter()
+            .map(|(id, phone)| PhoneDirectoryEntry {
+                id: id.clone(),
+                label: phone.label.clone(),
+                extension: phone.extension.clone().unwrap_or_else(|| id.clone()),
+            })
+            .collect();
+        entries.sort_by(|a, b| a.label.to_ascii_lowercase().cmp(&b.label.to_ascii_lowercase()));
+        entries
     }
 }
 
@@ -303,6 +338,31 @@ max_attempts = 2
                 _ => panic!("Expected Menu"),
             }
         });
+    }
+
+    #[test]
+    fn test_load_phone_directory() {
+        let toml_content = r#"
+[phones]
+777 = { label = "Shop speakerphone" }
+desk = { label = "Desk phone", extension = "111" }
+"#;
+        let dir = std::env::temp_dir().join("sipcord_test_dialplan");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("test_phone_directory.toml");
+        std::fs::write(&path, toml_content).unwrap();
+
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_hangup_tx, hangup_rx) = tokio::sync::mpsc::unbounded_channel();
+        let backend = StaticBackend::load(&path, "tok".to_string(), rx, hangup_rx).unwrap();
+
+        let directory = backend.phone_directory();
+        assert_eq!(directory.len(), 2);
+        assert_eq!(directory[0].id, "desk");
+        assert_eq!(directory[0].label, "Desk phone");
+        assert_eq!(directory[0].extension, "111");
+        assert_eq!(directory[1].id, "777");
+        assert_eq!(directory[1].extension, "777");
     }
 
     #[test]

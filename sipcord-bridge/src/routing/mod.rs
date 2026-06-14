@@ -27,6 +27,14 @@ pub struct HangupCallRequest {
     pub created_at: std::time::Instant,
 }
 
+/// Manually configured phone directory entry for Discord-originated calls.
+#[derive(Debug, Clone)]
+pub struct PhoneDirectoryEntry {
+    pub id: String,
+    pub label: String,
+    pub extension: String,
+}
+
 /// Dynamic IVR menu route.
 #[derive(Debug, Clone)]
 pub struct MenuRoute {

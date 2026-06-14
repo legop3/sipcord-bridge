@@ -12,6 +12,10 @@ This means you have to build the call routing backend yourself. I am including a
 extension = "8000"
 timeout_seconds = 10
 max_attempts = 3
+
+[phones]
+777 = { label = "Shop speakerphone" }
+111 = { label = "Desk phone" }
 ```
 but if you want more fancy routing you have to build it. You can easily use sipcord-bridge as a library and provide your own routers by implementing the `Backend` trait.
 
@@ -76,6 +80,24 @@ The menu uses `espeak-ng` for local text-to-speech with a female English voice.
 Emoji and common Discord channel separators are skipped in spoken names. Press
 `#` to repeat the current menu page, `9` for the next page when available, and
 `*` for the previous page when available.
+
+You can also add a phone directory for Discord-originated calls. These entries
+show up in `/directory` as buttons. Clicking one dials that extension from your
+current Discord voice channel:
+
+```toml
+[phones]
+777 = { label = "Shop speakerphone" }
+111 = { label = "Desk phone" }
+```
+
+By default, the TOML key is the extension to dial. If you want the key and
+dialed extension to differ, set `extension` explicitly:
+
+```toml
+[phones]
+shop = { label = "Shop speakerphone", extension = "777" }
+```
 
 ### 4a. Run with Docker (recommended)
 
@@ -225,6 +247,7 @@ Usage:
 
 ```text
 /call extension:1101
+/directory
 /hangup
 ```
 
@@ -238,6 +261,8 @@ Behavior:
   channel where the command was run.
 - `/hangup` ends active SIP calls connected to the voice channel where the
   command was run.
+- `/directory` opens the configured phone directory as Discord buttons. Clicking
+  a phone button behaves like `/call` for that extension.
 
 Current scope:
 - `/call` is implemented for the static self-host backend.

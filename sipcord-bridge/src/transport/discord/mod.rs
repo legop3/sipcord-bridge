@@ -2,7 +2,7 @@ mod voice;
 
 use crate::audio::simd;
 use crate::config::DiscordOutboundSipConfig;
-use crate::routing::{HangupCallRequest, OutboundCallRequest};
+use crate::routing::{HangupCallRequest, OutboundCallRequest, PhoneDirectoryEntry};
 use crate::services::snowflake::Snowflake;
 use audioadapter::Adapter;
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
@@ -15,9 +15,11 @@ use rubato::{
     WindowFunction,
 };
 use serenity::all::{
-    ChannelId, Client, Command, CommandInteraction, CommandOptionType, Context, CreateCommand,
-    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage, EventHandler,
-    FullEvent, GatewayIntents, GuildId, Interaction,
+    ButtonStyle, ChannelId, Client, CommandInteraction, CommandOptionType,
+    ComponentInteraction, Context, CreateActionRow, CreateButton, CreateCommand,
+    CreateCommandOption, CreateEmbed, CreateInteractionResponse,
+    CreateInteractionResponseMessage, EventHandler, FullEvent, GatewayIntents, GuildId,
+    Interaction,
 };
 use serenity::async_trait;
 use serenity::secrets::Token;
@@ -508,6 +510,7 @@ pub struct DiscordOutboundCallConfig {
     pub request_tx: tokio::sync::mpsc::UnboundedSender<OutboundCallRequest>,
     pub hangup_tx: tokio::sync::mpsc::UnboundedSender<HangupCallRequest>,
     pub bot_token: String,
+    pub phone_directory: Vec<PhoneDirectoryEntry>,
 }
 
 impl SharedDiscordClient {
@@ -616,12 +619,19 @@ impl EventHandler for SharedClientEventHandler {
                 }
             }
             FullEvent::InteractionCreate { interaction, .. } => {
-                if let Some(ref cfg) = self.outbound_call_config
-                    && let Interaction::Command(command) = interaction
-                {
-                    match command.data.name.as_str() {
-                        "call" => handle_call_command(ctx, command, cfg).await,
-                        "hangup" => handle_hangup_command(ctx, command, cfg).await,
+                if let Some(ref cfg) = self.outbound_call_config {
+                    match interaction {
+                        Interaction::Command(command) => match command.data.name.as_str() {
+                            "call" => handle_call_command(ctx, command, cfg).await,
+                            "hangup" => handle_hangup_command(ctx, command, cfg).await,
+                            "directory" => handle_directory_command(ctx, command, cfg).await,
+                            _ => {}
+                        },
+                        Interaction::Component(component) => {
+                            if component.data.custom_id.starts_with("sipcord:call:") {
+                                handle_directory_button(ctx, component, cfg).await;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -646,9 +656,16 @@ async fn register_call_commands(ctx: &Context, guild_id: GuildId) -> Result<(), 
     let hangup_command = CreateCommand::new("hangup")
         .description("Hang up active SIP calls in your current voice channel");
 
+    let directory_command =
+        CreateCommand::new("directory").description("Open the configured phone directory");
+
     guild_id.create_command(&ctx.http, call_command).await?;
     guild_id.create_command(&ctx.http, hangup_command).await?;
-    info!("Registered /call and /hangup commands for guild {}", guild_id);
+    guild_id.create_command(&ctx.http, directory_command).await?;
+    info!(
+        "Registered /call, /hangup, and /directory commands for guild {}",
+        guild_id
+    );
     Ok(())
 }
 
@@ -714,6 +731,140 @@ async fn handle_hangup_command(
     }
 }
 
+async fn handle_directory_command(
+    ctx: &Context,
+    command: &CommandInteraction,
+    cfg: &DiscordOutboundCallConfig,
+) {
+    let response = if cfg.phone_directory.is_empty() {
+        CreateInteractionResponseMessage::new()
+            .content("No phones are configured in the directory.")
+            .ephemeral(true)
+    } else {
+        build_directory_response(&cfg.phone_directory)
+    };
+
+    if let Err(e) = command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(response.ephemeral(true)),
+        )
+        .await
+    {
+        error!("Failed to respond to /directory interaction: {}", e);
+    }
+}
+
+async fn handle_directory_button(
+    ctx: &Context,
+    component: &ComponentInteraction,
+    cfg: &DiscordOutboundCallConfig,
+) {
+    let Some(entry_id) = component.data.custom_id.strip_prefix("sipcord:call:") else {
+        return;
+    };
+    let Some(entry) = cfg
+        .phone_directory
+        .iter()
+        .find(|entry| entry.id == entry_id)
+    else {
+        respond_to_component(
+            ctx,
+            component,
+            "That phone is no longer in the configured directory.",
+        )
+        .await;
+        return;
+    };
+
+    let response = match build_outbound_request_for_extension(
+        ctx,
+        component.guild_id,
+        component.user.id,
+        component
+            .member
+            .as_ref()
+            .and_then(|member| member.nick.clone()),
+        component.user.global_name.clone(),
+        component.user.name.clone(),
+        &entry.extension,
+        &format!("directory-{}", component.id),
+        cfg,
+        "/directory",
+    ) {
+        Ok(req) => match cfg.request_tx.send(req) {
+            Ok(()) => format!(
+                "Dialing `{}` (`{}`) from your current voice channel.",
+                entry.label, entry.extension
+            ),
+            Err(_) => "Outbound call queue is unavailable right now.".to_string(),
+        },
+        Err(msg) => msg,
+    };
+
+    respond_to_component(ctx, component, &response).await;
+}
+
+fn build_directory_response(entries: &[PhoneDirectoryEntry]) -> CreateInteractionResponseMessage {
+    let visible_entries: Vec<&PhoneDirectoryEntry> = entries
+        .iter()
+        .filter(|entry| is_safe_directory_id(&entry.id) && is_safe_extension(&entry.extension))
+        .take(25)
+        .collect();
+
+    if visible_entries.is_empty() {
+        return CreateInteractionResponseMessage::new()
+            .content("No callable phones are configured in the directory.")
+            .ephemeral(true);
+    }
+
+    let mut description = String::new();
+    for entry in &visible_entries {
+        description.push_str(&format!("`{}` - {}\n", entry.extension, entry.label));
+    }
+    if entries.len() > visible_entries.len() {
+        description.push_str("\nOnly the first 25 callable phones are shown.");
+    }
+
+    let embed = CreateEmbed::new()
+        .title("Phone Directory")
+        .description(description);
+
+    let mut rows = Vec::new();
+    for chunk in visible_entries.chunks(5) {
+        let buttons = chunk
+            .iter()
+            .map(|entry| {
+                CreateButton::new(format!("sipcord:call:{}", entry.id))
+                    .label(truncate_button_label(&entry.label, &entry.extension))
+                    .style(ButtonStyle::Primary)
+            })
+            .collect();
+        rows.push(CreateActionRow::Buttons(buttons));
+    }
+
+    CreateInteractionResponseMessage::new()
+        .embed(embed)
+        .components(rows)
+        .ephemeral(true)
+}
+
+async fn respond_to_component(ctx: &Context, component: &ComponentInteraction, response: &str) {
+    if let Err(e) = component
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(response)
+                    .ephemeral(true),
+            ),
+        )
+        .await
+    {
+        error!("Failed to respond to directory button interaction: {}", e);
+    }
+}
+
 fn build_outbound_request(
     ctx: &Context,
     command: &CommandInteraction,
@@ -729,6 +880,36 @@ fn build_outbound_request(
         .trim()
         .to_string();
 
+    build_outbound_request_for_extension(
+        ctx,
+        command.guild_id,
+        command.user.id,
+        command
+            .member
+            .as_ref()
+            .and_then(|member| member.nick.clone()),
+        command.user.global_name.clone(),
+        command.user.name.clone(),
+        &extension,
+        &command.id.to_string(),
+        cfg,
+        "/call",
+    )
+}
+
+fn build_outbound_request_for_extension(
+    ctx: &Context,
+    guild_id: Option<GuildId>,
+    user_id: serenity::all::UserId,
+    member_nick: Option<String>,
+    global_name: Option<String>,
+    username: String,
+    extension: &str,
+    request_id: &str,
+    cfg: &DiscordOutboundCallConfig,
+    command_name: &str,
+) -> Result<OutboundCallRequest, String> {
+    let extension = extension.trim().to_string();
     if !is_safe_extension(&extension) {
         return Err(
             "Extension contains unsupported characters. Use digits or simple SIP-safe extension text."
@@ -736,17 +917,12 @@ fn build_outbound_request(
         );
     }
 
-    let (guild_id, voice_channel_id) = current_voice_channel(ctx, command, "/call")?;
+    let (guild_id, voice_channel_id) =
+        current_voice_channel_for_user(ctx, guild_id, user_id, command_name)?;
 
-    let caller_username = command
-        .member
-        .as_ref()
-        .and_then(|member| member.nick.clone())
-        .or_else(|| command.user.global_name.clone())
-        .unwrap_or_else(|| command.user.name.clone());
-
+    let caller_username = member_nick.or(global_name).unwrap_or(username);
     Ok(OutboundCallRequest {
-        call_id: format!("discord-{}-{}", command.id, extension),
+        call_id: format!("discord-{}-{}", request_id, extension),
         discord_username: extension.clone(),
         guild_id: guild_id.get().to_string(),
         channel_id: voice_channel_id.get().to_string(),
@@ -784,20 +960,35 @@ fn current_voice_channel(
     command: &CommandInteraction,
     command_name: &str,
 ) -> Result<(GuildId, ChannelId), String> {
-    let guild_id = command
-        .guild_id
-        .ok_or_else(|| "This command only works inside a server.".to_string())?;
+    current_voice_channel_for_user(ctx, command.guild_id, command.user.id, command_name)
+}
+
+fn current_voice_channel_for_user(
+    ctx: &Context,
+    guild_id: Option<GuildId>,
+    user_id: serenity::all::UserId,
+    command_name: &str,
+) -> Result<(GuildId, ChannelId), String> {
+    let guild_id = guild_id.ok_or_else(|| "This command only works inside a server.".to_string())?;
     let guild = ctx
         .cache
         .guild(guild_id)
         .ok_or_else(|| "Guild is not available in cache yet. Try again in a moment.".to_string())?;
     let voice_channel_id = guild
         .voice_states
-        .get(&command.user.id)
+        .get(&user_id)
         .and_then(|state| state.channel_id)
         .ok_or_else(|| format!("Join a voice channel first, then run `{command_name}` there."))?;
 
     Ok((guild_id, voice_channel_id))
+}
+
+fn is_safe_directory_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 48
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 fn is_safe_extension(extension: &str) -> bool {
@@ -806,6 +997,22 @@ fn is_safe_extension(extension: &str) -> bool {
         && extension.chars().all(|ch| {
             ch.is_ascii_alphanumeric() || matches!(ch, '*' | '#' | '+' | '-' | '_' | '.')
         })
+}
+
+fn truncate_button_label(label: &str, fallback: &str) -> String {
+    const MAX_BUTTON_LABEL_CHARS: usize = 80;
+    let trimmed = if label.trim().is_empty() {
+        fallback.trim()
+    } else {
+        label.trim()
+    };
+    if trimmed.chars().count() <= MAX_BUTTON_LABEL_CHARS {
+        return trimmed.to_string();
+    }
+
+    let mut out: String = trimmed.chars().take(MAX_BUTTON_LABEL_CHARS - 3).collect();
+    out.push_str("...");
+    out
 }
 
 #[cfg(test)]
