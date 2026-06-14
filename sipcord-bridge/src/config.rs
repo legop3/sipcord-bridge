@@ -72,7 +72,7 @@ fn default_discord_outbound_sip_transport() -> String {
     "udp".to_string()
 }
 fn default_discord_outbound_extension_prefix() -> String {
-    "*80".to_string()
+    String::new()
 }
 
 /// All environment variables consumed by the bridge, deserialized once at startup.
@@ -546,7 +546,7 @@ mod tests {
             discord_outbound_sip_host: None,
             discord_outbound_sip_port: 5060,
             discord_outbound_sip_transport: "udp".to_string(),
-            discord_outbound_extension_prefix: "*80".to_string(),
+            discord_outbound_extension_prefix: String::new(),
         };
         assert_eq!(env.resolved_data_dir(), ".");
     }
@@ -574,7 +574,7 @@ mod tests {
             discord_outbound_sip_host: None,
             discord_outbound_sip_port: 5060,
             discord_outbound_sip_transport: "udp".to_string(),
-            discord_outbound_extension_prefix: "*80".to_string(),
+            discord_outbound_extension_prefix: String::new(),
         };
         assert_eq!(env.resolved_data_dir(), "/tmp");
     }
@@ -602,7 +602,7 @@ mod tests {
             discord_outbound_sip_host: None,
             discord_outbound_sip_port: 5060,
             discord_outbound_sip_transport: "udp".to_string(),
-            discord_outbound_extension_prefix: "*80".to_string(),
+            discord_outbound_extension_prefix: String::new(),
         };
         let tls = env.to_tls_config();
         assert_eq!(tls.cert_dir, PathBuf::from("/data/certs"));
@@ -646,13 +646,13 @@ mod tests {
             discord_outbound_sip_host: Some("192.168.0.25".to_string()),
             discord_outbound_sip_port: 5060,
             discord_outbound_sip_transport: "udp".to_string(),
-            discord_outbound_extension_prefix: "*80".to_string(),
+            discord_outbound_extension_prefix: String::new(),
         };
 
         let outbound = env.discord_outbound_sip_config().unwrap();
         assert_eq!(
             outbound.build_sip_uri("1101"),
-            "sip:*801101@192.168.0.25:5060;transport=udp"
+            "sip:1101@192.168.0.25:5060;transport=udp"
         );
     }
 

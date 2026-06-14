@@ -553,6 +553,7 @@ impl BridgeCoordinator {
                         tracking_id: req.call_id.clone(),
                         sip_uri,
                         caller_display_name: Some(req.caller_username.clone()),
+                        auto_answer: true,
                         fork_total,
                     });
                     outbound_backend.report_call_status(&req.call_id, "ringing");
@@ -585,6 +586,7 @@ impl BridgeCoordinator {
                         tracking_id: req.call_id.clone(),
                         sip_uri,
                         caller_display_name: Some(req.caller_username.clone()),
+                        auto_answer: false,
                         fork_total,
                     });
                 }
