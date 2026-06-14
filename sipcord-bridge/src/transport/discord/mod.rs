@@ -614,7 +614,7 @@ impl EventHandler for SharedClientEventHandler {
                     }
                 }
             }
-            FullEvent::InteractionCreate { interaction } => {
+            FullEvent::InteractionCreate { interaction, .. } => {
                 if let Some(ref cfg) = self.outbound_call_config
                     && let Interaction::Command(command) = interaction
                     && command.data.name == "call"
@@ -639,7 +639,7 @@ async fn register_call_command(ctx: &Context, guild_id: GuildId) -> Result<(), s
             .required(true),
         );
 
-    Command::create_guild_command(&ctx.http, guild_id, command).await?;
+    guild_id.create_command(&ctx.http, command).await?;
     info!("Registered /call command for guild {}", guild_id);
     Ok(())
 }
@@ -662,7 +662,7 @@ async fn handle_call_command(
 
     if let Err(e) = command
         .create_response(
-            ctx,
+            &ctx.http,
             CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
                     .content(response)
@@ -723,7 +723,7 @@ fn build_outbound_request(
         guild_id: guild_id.get().to_string(),
         channel_id: voice_channel_id.get().to_string(),
         bot_token: cfg.bot_token.clone(),
-        caller_username,
+        caller_username: caller_username.to_string(),
         sip_uri: Some(cfg.sip.build_sip_uri(&extension)),
         created_at: std::time::Instant::now(),
     })

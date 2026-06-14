@@ -524,19 +524,13 @@ impl BridgeCoordinator {
 
                 // Either dial the explicitly configured SIP URI, or look up
                 // registered contacts for the Discord username.
-                let contacts = if let Some(sip_uri) = req.sip_uri.clone() {
-                    vec![(
-                        sip_uri,
-                        String::new(),
-                        crate::services::registrar::SipTransport::Udp,
-                    )]
-                } else if let Some(ref registrar) = outbound_registrar {
+                let contacts = if let Some(ref registrar) = outbound_registrar {
                     registrar.get_contacts_for_discord_user(&req.discord_username)
                 } else {
                     Vec::new()
                 };
 
-                if contacts.is_empty() {
+                if req.sip_uri.is_none() && contacts.is_empty() {
                     warn!(
                         "No SIP contacts for user {} (call_id={})",
                         req.discord_username, req.call_id
@@ -548,24 +542,25 @@ impl BridgeCoordinator {
                 // Store the request so handle_outbound_call_answered can retrieve it
                 outbound_requests_for_handler.insert(req.call_id.clone(), req.clone());
 
-                let fork_total = contacts.len();
+                let fork_total = if req.sip_uri.is_some() { 1 } else { contacts.len() };
                 info!(
                     "Forking outbound call to {} contacts for user {} (call_id={})",
                     fork_total, req.discord_username, req.call_id
                 );
 
+                if let Some(sip_uri) = req.sip_uri.clone() {
+                    let _ = outbound_sip_cmd_tx.send(SipCommand::MakeOutboundCall {
+                        tracking_id: req.call_id.clone(),
+                        sip_uri,
+                        caller_display_name: Some(req.caller_username.clone()),
+                        fork_total,
+                    });
+                    outbound_backend.report_call_status(&req.call_id, "ringing");
+                    continue;
+                }
+
                 // Ring ALL registered contacts simultaneously
                 for (contact_uri, source_addr, transport) in &contacts {
-                    if req.sip_uri.is_some() {
-                        let _ = outbound_sip_cmd_tx.send(SipCommand::MakeOutboundCall {
-                            tracking_id: req.call_id.clone(),
-                            sip_uri: contact_uri.clone(),
-                            caller_display_name: Some(req.caller_username.clone()),
-                            fork_total,
-                        });
-                        continue;
-                    }
-
                     // Extract the user part from the Contact URI (e.g., "sip:3001@10.0.1.151:5060" -> "3001")
                     // The contact_uri has the correct SIP username/extension; source_addr is the NAT'd public address
                     let user_part = contact_uri
