@@ -1941,6 +1941,8 @@ async fn synthesize_tts_samples(
         .arg("/opt/piper-voices/en_US-amy-medium.onnx")
         .arg("--output_file")
         .arg(&raw_path)
+        .arg("--speaker_rate")
+        .arg("0.75")
         .stdin(Stdio::piped())
         .spawn()?;
 
