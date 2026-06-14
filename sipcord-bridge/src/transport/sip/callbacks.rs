@@ -45,7 +45,7 @@ use super::channel_audio::{
     complete_pending_channel_registration, disconnect_call_for_hold, get_channel_slot,
 };
 use super::ffi::types::*;
-use super::ffi::utils::{extract_sip_username, pj_str_to_string};
+use super::ffi::utils::{extract_sip_username, extract_display_name, pj_str_to_string};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use pjsua::*;
@@ -127,6 +127,77 @@ pub unsafe fn extract_user_agent(rdata: *const pjsip_rx_data) -> Option<String> 
         let value = pj_str_to_string(&(*str_hdr).hvalue);
         if value.is_empty() { None } else { Some(value) }
     }
+}
+
+/// Extract P-Asserted-Identity header from pjsip_rx_data
+/// This header contains the asserted identity of the caller (typically set by the PBX)
+pub unsafe fn extract_p_asserted_identity(rdata: *const pjsip_rx_data) -> Option<String> {
+    if rdata.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let msg = (*rdata).msg_info.msg;
+        if msg.is_null() {
+            return None;
+        }
+
+        // Find P-Asserted-Identity header by name
+        let name = super::ffi::pj_str::pj_str_from_cstr(c"P-Asserted-Identity");
+        let hdr = pjsip_msg_find_hdr_by_name(msg, &name, ptr::null_mut());
+        if hdr.is_null() {
+            return None;
+        }
+
+        // Cast to generic string header
+        let str_hdr = hdr as *const pjsip_generic_string_hdr;
+        if str_hdr.is_null() {
+            return None;
+        }
+
+        // Extract the header value and parse display name or URI
+        let value = pj_str_to_string(&(*str_hdr).hvalue);
+        if value.is_empty() {
+            return None;
+        }
+
+        // Try to extract display name first, fall back to extracting username from URI
+        let display_name = extract_display_name(&value);
+        if !display_name.is_empty() {
+            return Some(display_name);
+        }
+
+        // No display name, extract username from the URI
+        let username = extract_sip_username(&value);
+        if !username.is_empty() {
+            Some(username)
+        } else {
+            None
+        }
+    }
+}
+
+/// Extract the caller ID from the SIP message.
+/// Tries in order:
+/// 1. P-Asserted-Identity header (most reliable, set by PBX)
+/// 2. Display name from From header
+/// 3. SIP username from From header (fallback)
+pub unsafe fn extract_caller_id(from_uri: &str, rdata: *const pjsip_rx_data) -> String {
+    // First, try P-Asserted-Identity header
+    if let Some(p_asserted) = extract_p_asserted_identity(rdata) {
+        if !p_asserted.is_empty() {
+            return p_asserted;
+        }
+    }
+
+    // Second, try display name from From header
+    let display_name = extract_display_name(from_uri);
+    if !display_name.is_empty() {
+        return display_name;
+    }
+
+    // Third, extract SIP username from From URI
+    extract_sip_username(from_uri)
 }
 
 /// Check if User-Agent indicates a SIPVicious scanner or similar tool
@@ -326,8 +397,11 @@ pub unsafe extern "C" fn on_incoming_call_cb(
         let from_uri = pj_str_to_string(&ci.remote_info);
         let to_uri = pj_str_to_string(&ci.local_info);
 
-        // Extract username from From URI (caller's SIP username)
+        // Extract username from From URI (caller's SIP username - for authentication)
         let sip_username = extract_sip_username(&from_uri);
+
+        // Extract the caller ID for display (tries P-Asserted-Identity, display name, then falls back to sip_username)
+        let caller_id = extract_caller_id(&from_uri, rdata);
 
         // Extract extension from To URI (the number they dialed)
         let extension = extract_sip_username(&to_uri);
@@ -482,7 +556,7 @@ pub unsafe extern "C" fn on_incoming_call_cb(
                     extension.clone(),
                     source_ip,
                 );
-                (handlers.on_call_authenticated)(call_id, params, sip_username, extension, source_ip);
+                (handlers.on_call_authenticated)(call_id, params, caller_id, extension, source_ip);
             }
         } else {
             // No Authorization header - send 401 challenge
