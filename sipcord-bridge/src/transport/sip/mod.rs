@@ -232,6 +232,9 @@ fn run_pjsua_loop(
     initialized: Arc<RwLock<bool>>,
     command_rx: Receiver<SipCommand>,
 ) -> Result<(), SipInitError> {
+    // Set the require_auth flag globally so callbacks can access it
+    let _ = super::ffi::types::REQUIRE_AUTH.set(config.require_auth);
+
     // Initialize pjsua with optional TLS
     init_pjsua(&config, tls_config.as_ref())?;
     *initialized.write() = true;

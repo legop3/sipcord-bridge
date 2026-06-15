@@ -429,29 +429,50 @@ pub unsafe extern "C" fn on_rx_request_cb(rdata: *mut pjsip_rx_data) -> pj_bool_
                 );
             }
         } else {
-            // No Authorization header - send 401 challenge
-            tracing::debug!(
-                "REGISTER without auth from {}, sending 401 challenge",
-                ip_str
-            );
+            // No Authorization header
+            let require_auth = super::ffi::types::REQUIRE_AUTH.get().copied().unwrap_or(true);
+            
+            if require_auth {
+                // Auth is required - send 401 challenge
+                tracing::debug!(
+                    "REGISTER without auth from {}, sending 401 challenge",
+                    ip_str
+                );
 
-            // Generate a cryptographically random nonce
-            let nonce: String = {
-                let bytes: [u8; 16] = rand::random();
-                bytes.iter().map(|b| format!("{:02x}", b)).collect()
-            };
-            let www_auth = format!(
-                "Digest realm=\"{}\", nonce=\"{}\", algorithm=MD5, qop=\"auth\"",
-                SIP_REALM, nonce
-            );
+                // Generate a cryptographically random nonce
+                let nonce: String = {
+                    let bytes: [u8; 16] = rand::random();
+                    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+                };
+                let www_auth = format!(
+                    "Digest realm=\"{}\", nonce=\"{}\", algorithm=MD5, qop=\"auth\"",
+                    SIP_REALM, nonce
+                );
 
-            if let Err(e) = respond_stateless_with_headers(
-                rdata,
-                401,
-                None,
-                &[(c"WWW-Authenticate", www_auth.as_str())],
-            ) {
-                tracing::warn!("Failed to send 401 challenge to REGISTER: {}", e);
+                if let Err(e) = respond_stateless_with_headers(
+                    rdata,
+                    401,
+                    None,
+                    &[(c"WWW-Authenticate", www_auth.as_str())],
+                ) {
+                    tracing::warn!("Failed to send 401 challenge to REGISTER: {}", e);
+                }
+            } else {
+                // Auth is not required - accept REGISTER without authentication
+                tracing::debug!(
+                    "Auth not required, accepting REGISTER from {} without authentication",
+                    ip_str
+                );
+                
+                let contact_uri = extract_contact_uri(rdata);
+                let expires = extract_expires(rdata);
+                
+                if let Err(e) = send_register_ok(rdata, expires, contact_uri.as_deref()) {
+                    tracing::warn!(
+                        "REGISTER 200 OK (no auth required) send failed: {} — strict clients may reject",
+                        e
+                    );
+                }
             }
         }
 

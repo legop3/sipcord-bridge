@@ -72,6 +72,10 @@ fn default_discord_outbound_sip_transport() -> String {
     "udp".to_string()
 }
 
+fn default_sip_require_auth() -> bool {
+    true
+}
+
 /// All environment variables consumed by the bridge, deserialized once at startup.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct EnvConfig {
@@ -100,6 +104,8 @@ pub struct EnvConfig {
     pub rtp_public_ip: Option<String>,
     pub sip_local_host: Option<String>,
     pub sip_local_cidr: Option<String>,
+    #[serde(default = "default_sip_require_auth")]
+    pub sip_require_auth: bool,
 
     // TLS
     pub tls_cert_dir: Option<String>,
@@ -199,6 +205,7 @@ impl EnvConfig {
             rtp_port_end: self.rtp_port_end,
             rtp_public_ip: self.rtp_public_ip.clone(),
             local_net,
+            require_auth: self.sip_require_auth,
         })
     }
 
@@ -446,6 +453,8 @@ pub struct SipConfig {
     /// Local network support: rewrite Contact headers for clients in local_network to use local_host
     /// This allows the bridge to serve both public and local clients simultaneously
     pub local_net: Option<LocalNetConfig>,
+    /// Whether to require SIP authentication for incoming calls (default: true)
+    pub require_auth: bool,
 }
 
 #[derive(Debug, Clone)]

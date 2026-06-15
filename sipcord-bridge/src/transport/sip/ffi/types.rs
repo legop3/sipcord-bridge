@@ -252,6 +252,10 @@ pub static LOCAL_NET_CONFIG: OnceLock<Option<LocalNetConfig>> = OnceLock::new();
 /// Stored as (public_host, sip_port).
 pub static PUBLIC_HOST_CONFIG: OnceLock<Option<(String, u16)>> = OnceLock::new();
 
+/// Whether SIP authentication is required for incoming calls and registrations
+/// If false, calls without authentication headers are accepted without challenge
+pub static REQUIRE_AUTH: OnceLock<bool> = OnceLock::new();
+
 /// Flag to indicate audio thread should stop
 pub static AUDIO_THREAD_RUNNING: AtomicBool = AtomicBool::new(false);
 

@@ -559,27 +559,52 @@ pub unsafe extern "C" fn on_incoming_call_cb(
                 (handlers.on_call_authenticated)(call_id, params, caller_id, extension, source_ip);
             }
         } else {
-            // No Authorization header - send 401 challenge
-            tracing::info!("No auth header, sending 401 challenge for call {}", call_id);
+            // No Authorization header
+            let require_auth = super::ffi::types::REQUIRE_AUTH.get().copied().unwrap_or(true);
+            
+            if require_auth {
+                // Auth is required - send 401 challenge
+                tracing::info!("No auth header, sending 401 challenge for call {}", call_id);
 
-            // Generate a cryptographically random nonce
-            let nonce = {
-                let bytes: [u8; 16] = rand::random();
-                bytes
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<String>()
-            };
+                // Generate a cryptographically random nonce
+                let nonce = {
+                    let bytes: [u8; 16] = rand::random();
+                    bytes
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<String>()
+                };
 
-            // Create WWW-Authenticate header value
-            // Format: Digest realm="sipcord", nonce="xxx", algorithm=MD5, qop="auth"
-            let www_auth = format!(
-                "Digest realm=\"{}\", nonce=\"{}\", algorithm=MD5, qop=\"auth\"",
-                SIP_REALM, nonce
-            );
+                // Create WWW-Authenticate header value
+                // Format: Digest realm="sipcord", nonce="xxx", algorithm=MD5, qop="auth"
+                let www_auth = format!(
+                    "Digest realm=\"{}\", nonce=\"{}\", algorithm=MD5, qop=\"auth\"",
+                    SIP_REALM, nonce
+                );
 
-            // Send 401 Unauthorized with WWW-Authenticate header
-            send_401_challenge(call_id, &www_auth);
+                // Send 401 Unauthorized with WWW-Authenticate header
+                send_401_challenge(call_id, &www_auth);
+            } else {
+                // Auth is not required - accept the call without auth
+                tracing::info!("Auth not required, accepting call {} without authentication", call_id);
+                
+                // Create a minimal auth params object with empty values
+                // The extension/routing will still work without actual authentication
+                let params = DigestAuthParams::default();
+                let caller_id = extract_caller_id(&from_uri, rdata);
+
+                if let Some(callbacks) = CALLBACKS.get()
+                    && let Some(ref handlers) = *callbacks.lock()
+                {
+                    (handlers.on_incoming_call)(
+                        call_id,
+                        sip_username.clone(),
+                        extension.clone(),
+                        source_ip,
+                    );
+                    (handlers.on_call_authenticated)(call_id, params, caller_id, extension, source_ip);
+                }
+            }
         }
     }
 }
