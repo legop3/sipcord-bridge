@@ -560,7 +560,7 @@ pub unsafe extern "C" fn on_incoming_call_cb(
             }
         } else {
             // No Authorization header
-            let require_auth = super::ffi::types::REQUIRE_AUTH.get().copied().unwrap_or(true);
+            let require_auth = REQUIRE_AUTH.get().copied().unwrap_or(true);
             
             if require_auth {
                 // Auth is required - send 401 challenge
